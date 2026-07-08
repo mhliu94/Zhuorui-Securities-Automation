@@ -38,6 +38,20 @@ SHORT_SETTLE = 0.15
 FIELD_FOCUS_SETTLE = 0.35
 PASSWORD_FOCUS_SETTLE = 0.3
 FAST_SCREEN_SIZE = (1080, 2424)
+FAST_TRADE_SHEET_SIDE_BUTTONS = {
+    "buy": (197, 2124),
+    "sell": (540, 2124),
+}
+FAST_TICKET_ORDER_TYPE_FIELD = (671, 1556)
+FAST_TICKET_ORDER_TYPE_OPTIONS = {
+    "limit": (540, 2109),
+    "market": (539, 2277),
+}
+FAST_TICKET_PRICE_FIELD = (608, 1703)
+FAST_TICKET_QUANTITY_FIELD = (608, 1850)
+FAST_TICKET_SUBMIT_BUTTON = (820, 2266)
+FAST_ASSETS_TAB = (270, 2285)
+FAST_NET_ASSETS_TILE_MIDDLE_LEFT = (170, 1300)
 QUOTES_TAB_X_RATIO = 1 / 12
 ASSETS_TAB_X_RATIO = 0.25
 BOTTOM_TAB_Y_RATIO = 0.943
@@ -47,7 +61,7 @@ SUCCESS_REVOKE_X_RATIO = 0.29
 SUCCESS_REVOKE_Y_RATIO = 0.895
 WATCHLIST_SYMBOL_SCORE_THRESHOLD = 0.70
 POSITION_TABLE_MAX_SCROLLS = 8
-POSITION_LANDING_BACK_TAPS = 5
+POSITION_LANDING_BACK_TAPS = 3
 POSITION_LANDING_BACK_DELAY = 1.0
 ORDER_WATCHLIST_BACK_TAPS = 3
 ORDER_WATCHLIST_BACK_DELAY = 1.0
@@ -987,6 +1001,23 @@ class ZhuoruiTrader:
             self.tap_app_back_button()
             time.sleep(POSITION_LANDING_BACK_DELAY)
 
+    def return_to_landing_page_fast(self, max_taps: int = POSITION_LANDING_BACK_TAPS) -> None:
+        for _ in range(max_taps):
+            if self.screenshot_shows_main_landing_page():
+                return
+            if self.screenshot_shows_navigation_drawer():
+                self.adb.keyevent(4)
+            else:
+                self.tap_app_back_button()
+            time.sleep(POSITION_LANDING_BACK_DELAY)
+        if self.screenshot_shows_navigation_drawer():
+            self.adb.keyevent(4)
+            time.sleep(SHORT_SETTLE)
+        if not self.screenshot_shows_main_landing_page():
+            raise ZhuoruiAutomationError(
+                f"Could not return to Zhuorui's main screen after {max_taps} back taps."
+            )
+
     def is_assets_page(self, nodes: list[UiNode]) -> bool:
         return bool(
             first_by_id(nodes, ":id/cardNetValue")
@@ -1076,12 +1107,55 @@ class ZhuoruiTrader:
         raise ZhuoruiAutomationError("Cash Details did not open from the Net Assets tile.")
 
     def collect_positions(self) -> dict[str, list[dict[str, str]]]:
+        if self.is_fast_screen():
+            return self.collect_positions_fast()
+
         self.return_to_landing_page()
         assets_nodes = self.open_assets()
         securities = self.collect_security_positions(assets_nodes)
         cash_nodes = self.open_cash_details()
         cash = self.collect_cash_positions(cash_nodes)
         return {"cash": cash, "securities": securities}
+
+    def collect_positions_fast(self) -> dict[str, list[dict[str, str]]]:
+        self.return_to_landing_page_fast()
+        self.tap_assets_tab_fast()
+        time.sleep(0.8)
+        self.scroll_assets_to_position_bottom()
+        time.sleep(0.7)
+        securities = self.collect_visible_security_positions_once()
+        self.scroll_assets_toward_top()
+        time.sleep(0.8)
+        self.tap_net_assets_tile_fast()
+        time.sleep(0.9)
+        cash = self.collect_cash_positions()
+        return {"cash": cash, "securities": securities}
+
+    def tap_assets_tab_fast(self) -> None:
+        if self.is_fast_screen():
+            self.adb.tap(*FAST_ASSETS_TAB)
+            return
+        self.tap_ratio(ASSETS_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
+
+    def scroll_assets_to_position_bottom(self) -> None:
+        width, height = self.adb.wm_size()
+        self.adb.swipe(width // 2, round(height * 0.84), width // 2, round(height * 0.34), 550)
+
+    def collect_visible_security_positions_once(self) -> list[dict[str, str]]:
+        with tempfile.TemporaryDirectory(prefix="zhuorui-positions-") as temp_name:
+            temp_dir = Path(temp_name)
+            ocr = NumericOcr.from_adb(self.adb, temp_dir)
+            screenshot_path = temp_dir / "positions.png"
+            nodes = self.current_nodes()
+            self.adb.screenshot(screenshot_path)
+            securities = self.extract_visible_security_positions(nodes, screenshot_path, ocr)
+        if not securities:
+            visible = [node.text for node in self.current_nodes() if node.text]
+            raise ZhuoruiAutomationError(f"Positions table rows were not found. Visible text: {visible[:16]}")
+        return securities
+
+    def tap_net_assets_tile_fast(self) -> None:
+        self.adb.tap(*FAST_NET_ASSETS_TILE_MIDDLE_LEFT)
 
     def collect_cash_positions(self, nodes: Optional[list[UiNode]] = None) -> list[dict[str, str]]:
         nodes = nodes or self.current_nodes()
@@ -1215,7 +1289,7 @@ class ZhuoruiTrader:
 
     def scroll_assets_toward_top(self) -> None:
         width, height = self.adb.wm_size()
-        self.adb.swipe(width // 2, round(height * 0.45), width // 2, round(height * 0.82), 450)
+        self.adb.swipe(width // 2, round(height * 0.30), width // 2, round(height * 0.88), 650)
 
     def open_symbol_from_watchlist(self, symbol: str) -> None:
         self.return_to_watchlist_landing()
@@ -1368,44 +1442,23 @@ class ZhuoruiTrader:
             time.sleep(FAST_POLL)
         raise ZhuoruiAutomationError("Trade sheet did not open.")
 
-    def try_fast_choose_side(self, side: str) -> bool:
+    def try_fast_choose_side(self, side: str, trade_password: Optional[str] = None) -> bool:
         if not self.is_fast_screen():
             return False
 
         self.tap_ratio(0.835, 0.943)
-        time.sleep(0.2)
+        time.sleep(0.25)
+        if self.maybe_enter_trading_password_from_screenshot(trade_password):
+            time.sleep(0.6)
+            self.tap_ratio(0.835, 0.943)
+            time.sleep(0.25)
 
-        target_id = ":id/layoutBuy" if side == "buy" else ":id/layoutSell"
-        deadline = time.monotonic() + 0.8
-        while time.monotonic() < deadline:
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                return False
-            if first_by_id(nodes, ":id/sbTrade") and first_by_id(nodes, ":id/tvOrderType"):
-                return True
-            target = first_by_id(nodes, target_id)
-            if target:
-                self.adb.tap_node(target)
-                time.sleep(0.25)
-                break
-            time.sleep(FAST_POLL)
-        else:
-            return False
-
-        deadline = time.monotonic() + 0.9
-        while time.monotonic() < deadline:
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                return False
-            if first_by_id(nodes, ":id/sbTrade") and first_by_id(nodes, ":id/tvOrderType"):
-                return True
-            time.sleep(FAST_POLL)
-        return False
+        self.adb.tap(*FAST_TRADE_SHEET_SIDE_BUTTONS[side])
+        time.sleep(0.5)
+        return True
 
     def choose_side(self, side: str, trade_password: Optional[str]) -> None:
-        if self.try_fast_choose_side(side):
+        if self.try_fast_choose_side(side, trade_password=trade_password):
             return
 
         self.open_trade_sheet(trade_password=trade_password)
@@ -1480,6 +1533,9 @@ class ZhuoruiTrader:
         raise ZhuoruiAutomationError(f"{side.title()} order ticket did not open.")
 
     def select_order_type(self, order_type_name: str) -> list[UiNode]:
+        if self.try_fast_select_order_type(order_type_name):
+            return []
+
         wanted = order_type_name.title()
         nodes = self.current_nodes()
         order_type = first_by_id(nodes, ":id/tvOrderType")
@@ -1498,6 +1554,15 @@ class ZhuoruiTrader:
                 return self.current_nodes()
             time.sleep(FAST_POLL)
         raise ZhuoruiAutomationError(f"{wanted} order option was not found.")
+
+    def try_fast_select_order_type(self, order_type_name: str) -> bool:
+        if not self.is_fast_screen() or order_type_name != "limit":
+            return False
+        self.adb.tap(*FAST_TICKET_ORDER_TYPE_FIELD)
+        time.sleep(0.18)
+        self.adb.tap(*FAST_TICKET_ORDER_TYPE_OPTIONS[order_type_name])
+        time.sleep(0.25)
+        return True
 
     def price_input(self, nodes: list[UiNode]) -> Optional[UiNode]:
         return next(
@@ -1521,9 +1586,14 @@ class ZhuoruiTrader:
         )
 
     def set_limit_price(self, price: Decimal, nodes: Optional[list[UiNode]] = None) -> None:
+        price_text = decimal_to_input_text(price)
+        if self.is_fast_screen():
+            self.replace_text_at(*FAST_TICKET_PRICE_FIELD, price_text, clear_chars=16)
+            self.press_keyboard_enter()
+            return
+
         nodes = nodes or self.current_nodes()
         price_input = self.wait_for_ticket_input(self.price_input, "Limit price input not found.", nodes=nodes)
-        price_text = decimal_to_input_text(price)
         self.replace_text(price_input, price_text, clear_chars=max(16, len(price_input.text) + 5))
         self.press_keyboard_enter()
         self.restore_order_ticket_position("price", price_input)
@@ -1534,6 +1604,11 @@ class ZhuoruiTrader:
         nodes: Optional[list[UiNode]] = None,
         enter_presses_after_input: int = 0,
     ) -> None:
+        if self.is_fast_screen() and enter_presses_after_input > 0:
+            self.replace_text_at(*FAST_TICKET_QUANTITY_FIELD, str(quantity), clear_chars=10)
+            self.press_keyboard_enter(enter_presses_after_input, delay_between=0.5)
+            return
+
         nodes = nodes or self.current_nodes()
         quantity_input = self.wait_for_ticket_input(self.quantity_input, "Quantity input not found.", nodes=nodes)
         self.replace_text(quantity_input, str(quantity), clear_chars=max(10, len(quantity_input.text) + 5))
@@ -1558,6 +1633,14 @@ class ZhuoruiTrader:
     def replace_text(self, node: UiNode, text: str, clear_chars: int = 20) -> None:
         self.adb.tap_node(node)
         # Some Zhuorui fields animate after focus; typing too early can be dropped.
+        time.sleep(FIELD_FOCUS_SETTLE)
+        self.adb.keyevent(123, *([67] * clear_chars))  # MOVE_END, then DEL.
+        if text:
+            self.adb.input_text(text)
+            time.sleep(0.1)
+
+    def replace_text_at(self, x: int, y: int, text: str, clear_chars: int = 20) -> None:
+        self.adb.tap(x, y)
         time.sleep(FIELD_FOCUS_SETTLE)
         self.adb.keyevent(123, *([67] * clear_chars))  # MOVE_END, then DEL.
         if text:
@@ -1831,6 +1914,9 @@ class ZhuoruiTrader:
         order_type_name: str,
         limit_price: Optional[Decimal],
     ) -> UiNode:
+        if self.is_fast_screen() and order_type_name == "limit":
+            return self.fast_submit_node()
+
         nodes = self.current_nodes()
         order_type = first_by_id(nodes, ":id/tvOrderType")
         submit = first_by_id(nodes, ":id/sbTrade")
@@ -1853,7 +1939,27 @@ class ZhuoruiTrader:
         )
         return submit
 
+    def fast_submit_node(self) -> UiNode:
+        x, y = FAST_TICKET_SUBMIT_BUTTON
+        return UiNode(
+            text="",
+            hint="",
+            content_desc="",
+            resource_id=f"{PACKAGE}:id/sbTrade",
+            klass="android.widget.Button",
+            clickable=True,
+            focusable=True,
+            focused=False,
+            password=False,
+            bounds=Bounds(x - 1, y - 1, x + 1, y + 1),
+        )
+
     def submit_prepared_order(self, password: Optional[str], dismiss_success: bool = True) -> None:
+        if self.is_fast_screen():
+            self.adb.tap(*FAST_TICKET_SUBMIT_BUTTON)
+            self.handle_confirmation_flow(password=password, dismiss_success=dismiss_success)
+            return
+
         submit = self.wait_for_ready_submit_button(timeout=1.5)
         require(submit is not None, "Prepared order submit button is not restored to the tappable position.")
         self.adb.tap_node(submit)
