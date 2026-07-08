@@ -19,7 +19,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -68,6 +68,9 @@ ORDER_WATCHLIST_BACK_DELAY = 1.0
 FILL_OR_KILL_REVOKE_DELAY = 3.0
 ANDROID_ROBOTO_FONT = "/system/fonts/Roboto-Regular.ttf"
 KEYCODE_ENTER = 66
+MARKET_BUY_LIMIT_MULTIPLIER = Decimal("1.15")
+MARKET_SELL_LIMIT_MULTIPLIER = Decimal("0.85")
+MARKET_LIMIT_PRICE_QUANTUM = Decimal("0.0001")
 
 KNOWN_ADB_PATHS = [
     Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / "adb.exe",
@@ -690,6 +693,13 @@ class NumericOcr:
         return best_char
 
 
+@dataclass(frozen=True)
+class WatchlistSymbolMatch:
+    score: float
+    tap_point: tuple[int, int]
+    last_price: Optional[Decimal]
+
+
 class WatchlistSymbolMatcher:
     def __init__(self, font_path: Path):
         try:
@@ -712,12 +722,17 @@ class WatchlistSymbolMatcher:
         adb.pull(ANDROID_ROBOTO_FONT, font_path)
         return cls(font_path)
 
-    def find_symbol(self, screenshot_path: Path, symbol: str) -> Optional[tuple[float, tuple[int, int]]]:
+    def find_symbol(
+        self,
+        screenshot_path: Path,
+        symbol: str,
+        price_ocr: Optional[NumericOcr] = None,
+    ) -> Optional["WatchlistSymbolMatch"]:
         image = self.Image.open(screenshot_path).convert("RGB")
         width, height = image.size
         target = symbol.upper()
         templates = self.render_target_templates(target)
-        best: Optional[tuple[float, tuple[int, int]]] = None
+        best: Optional[WatchlistSymbolMatch] = None
         for line_top, line_bottom in self.symbol_line_runs(image):
             crop = image.crop(
                 (
@@ -730,11 +745,33 @@ class WatchlistSymbolMatcher:
             score = self.score_symbol_crop(crop, templates)
             center_y = (line_top + line_bottom) // 2
             tap_point = (round(width * 0.14), center_y)
-            if best is None or score > best[0]:
-                best = (score, tap_point)
-        if best and best[0] >= WATCHLIST_SYMBOL_SCORE_THRESHOLD:
+            last_price = self.recognize_last_price(image, center_y, price_ocr)
+            candidate = WatchlistSymbolMatch(score=score, tap_point=tap_point, last_price=last_price)
+            if best is None or score > best.score:
+                best = candidate
+        if best and best.score >= WATCHLIST_SYMBOL_SCORE_THRESHOLD:
             return best
         return None
+
+    def recognize_last_price(self, image, symbol_center_y: int, price_ocr: Optional[NumericOcr]) -> Optional[Decimal]:
+        if price_ocr is None:
+            return None
+        width, _ = image.size
+        crop = image.crop(
+            (
+                round(width * 0.52),
+                max(0, symbol_center_y - 100),
+                round(width * 0.74),
+                max(0, symbol_center_y - 25),
+            )
+        )
+        price_text = price_ocr.recognize_crop(crop)
+        if "." not in price_text:
+            return None
+        price = parse_decimal_text(price_text)
+        if price is None or price <= 0:
+            return None
+        return price
 
     def symbol_line_runs(self, image) -> list[tuple[int, int]]:
         width, height = image.size
@@ -838,6 +875,9 @@ class ZhuoruiTrader:
         self.artifact_dir = artifact_dir
         self.fast_path = fast_path
         self.prepared_submit: Optional[UiNode] = None
+        self.prepared_order_type_name: Optional[str] = None
+        self.prepared_limit_price: Optional[Decimal] = None
+        self.market_reference_price: Optional[Decimal] = None
 
     def launch(self) -> None:
         self.adb.shell("am", "start", "-n", LAUNCH_ACTIVITY, timeout=5)
@@ -932,6 +972,8 @@ class ZhuoruiTrader:
             screenshot_path = Path(tmp.name)
         try:
             self.adb.screenshot(screenshot_path)
+            if self.image_shows_navigation_drawer(screenshot_path):
+                return False
             return self.image_shows_main_landing_page(screenshot_path)
         except ZhuoruiAutomationError:
             return False
@@ -1291,27 +1333,33 @@ class ZhuoruiTrader:
         width, height = self.adb.wm_size()
         self.adb.swipe(width // 2, round(height * 0.30), width // 2, round(height * 0.88), 650)
 
-    def open_symbol_from_watchlist(self, symbol: str) -> None:
+    def open_symbol_from_watchlist(self, symbol: str) -> Optional[Decimal]:
         self.return_to_watchlist_landing()
         with tempfile.TemporaryDirectory(prefix="zhuorui-watchlist-") as temp_name:
             temp_dir = Path(temp_name)
             screenshot_path = temp_dir / "watchlist.png"
             matcher = WatchlistSymbolMatcher.from_adb(self.adb, temp_dir)
+            price_ocr = NumericOcr(matcher.font_path)
             for attempt in range(2):
                 self.tap_ratio(QUOTES_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
                 time.sleep(0.25 if attempt == 0 else 0.5)
                 self.adb.screenshot(screenshot_path)
-                match = matcher.find_symbol(screenshot_path, symbol)
+                match = matcher.find_symbol(screenshot_path, symbol, price_ocr=price_ocr)
                 if match:
-                    score, (x, y) = match
+                    x, y = match.tap_point
                     if self.fast_path:
+                        price_note = (
+                            f"; last price {decimal_to_input_text(match.last_price)}"
+                            if match.last_price is not None
+                            else ""
+                        )
                         print(
-                            f"Watchlist OCR matched {symbol.upper()} at score {score:.2f}; tapping row.",
+                            f"Watchlist OCR matched {symbol.upper()} at score {match.score:.2f}{price_note}; tapping row.",
                             file=sys.stderr,
                         )
                     self.adb.tap(x, y)
                     time.sleep(0.8)
-                    return
+                    return match.last_price
             raise ZhuoruiAutomationError(
                 f"{symbol.upper()} was not found in the visible watchlist. "
                 "Add it to the watchlist and keep it visible without scrolling."
@@ -1331,6 +1379,37 @@ class ZhuoruiTrader:
         raise ZhuoruiAutomationError(
             f"Could not return to Zhuorui's main watchlist screen after {ORDER_WATCHLIST_BACK_TAPS} back taps."
         )
+
+    def read_quote_last_price(self) -> Optional[Decimal]:
+        with tempfile.TemporaryDirectory(prefix="zhuorui-quote-price-") as temp_name:
+            temp_dir = Path(temp_name)
+            screenshot_path = temp_dir / "quote.png"
+            ocr = NumericOcr.from_adb(self.adb, temp_dir)
+            self.adb.screenshot(screenshot_path)
+            image = ocr.Image.open(screenshot_path).convert("RGB")
+            width, height = image.size
+            boxes = [
+                (
+                    round(width * 0.03),
+                    round(height * 0.15),
+                    round(width * 0.38),
+                    round(height * 0.25),
+                ),
+                (
+                    round(width * 0.03),
+                    round(height * 0.16),
+                    round(width * 0.35),
+                    round(height * 0.23),
+                ),
+            ]
+            for box in boxes:
+                price_text = ocr.recognize_crop(image.crop(box))
+                if "." not in price_text:
+                    continue
+                price = parse_decimal_text(price_text)
+                if price is not None and price > 0:
+                    return price
+        return None
 
     def screenshot_shows_navigation_drawer(self) -> bool:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -1891,21 +1970,44 @@ class ZhuoruiTrader:
         assume_current_symbol: bool,
     ) -> None:
         self.prepared_submit = None
+        self.prepared_order_type_name = None
+        self.prepared_limit_price = None
+        self.market_reference_price = None
+        market_reference_price: Optional[Decimal] = None
         if not assume_current_symbol:
-            self.open_symbol_from_watchlist(symbol)
+            market_reference_price = self.open_symbol_from_watchlist(symbol)
         else:
             nodes = self.current_nodes()
             if not self.is_quote_page(nodes):
                 raise ZhuoruiAutomationError("--assume-current-symbol requires the desired quote page to be open.")
 
+        effective_order_type_name = order_type_name
+        effective_limit_price = limit_price
+        if order_type_name == "market":
+            market_reference_price = market_reference_price or self.read_quote_last_price()
+            require(
+                market_reference_price is not None,
+                "Could not OCR the last traded price needed to synthesize a market order.",
+            )
+            effective_order_type_name = "limit"
+            effective_limit_price = through_market_limit_price(market_reference_price, side)
+            self.market_reference_price = market_reference_price
+
+        self.prepared_order_type_name = effective_order_type_name
+        self.prepared_limit_price = effective_limit_price
         self.choose_side(side, trade_password=trade_password)
-        ticket_nodes = self.select_order_type(order_type_name)
-        if order_type_name == "limit":
-            require(limit_price is not None, "Limit orders require --limit-price.")
-            self.set_limit_price(limit_price, nodes=ticket_nodes if self.is_fast_screen() else None)
-        quantity_enter_presses = 3 if order_type_name == "limit" else 0
+        ticket_nodes = self.select_order_type(effective_order_type_name)
+        if effective_order_type_name == "limit":
+            require(effective_limit_price is not None, "Limit orders require --limit-price.")
+            self.set_limit_price(effective_limit_price, nodes=ticket_nodes if self.is_fast_screen() else None)
+        quantity_enter_presses = 3 if effective_order_type_name == "limit" else 0
         self.set_quantity(quantity, enter_presses_after_input=quantity_enter_presses)
-        self.prepared_submit = self.verify_ticket_ready(side, quantity, order_type_name, limit_price)
+        self.prepared_submit = self.verify_ticket_ready(
+            side,
+            quantity,
+            effective_order_type_name,
+            effective_limit_price,
+        )
 
     def verify_ticket_ready(
         self,
@@ -2290,6 +2392,15 @@ def decimal_to_input_text(value: Decimal) -> str:
     return text or "0"
 
 
+def through_market_limit_price(last_price: Decimal, side: str) -> Decimal:
+    multiplier = MARKET_BUY_LIMIT_MULTIPLIER if side == "buy" else MARKET_SELL_LIMIT_MULTIPLIER
+    rounding = ROUND_CEILING if side == "buy" else ROUND_FLOOR
+    price = (last_price * multiplier).quantize(MARKET_LIMIT_PRICE_QUANTUM, rounding=rounding)
+    if price <= 0:
+        raise ZhuoruiAutomationError(f"Computed market-order limit price is not positive: {price}")
+    return price
+
+
 def add_common_automation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config",
@@ -2349,7 +2460,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--order-type",
         choices=["market", "limit"],
         default="market",
-        help="order type to prepare; defaults to market",
+        help="order type to prepare; market is submitted as a 15%% through-market limit order",
     )
     parser.add_argument(
         "--limit-price",
@@ -2479,7 +2590,12 @@ def main(argv: list[str]) -> int:
         )
 
         order_summary = f"{args.order_type.upper()} {args.side.upper()} {args.quantity} {args.symbol.upper()}"
-        if args.order_type == "limit":
+        if args.order_type == "market":
+            require(trader.prepared_limit_price is not None, "Synthesized market-order limit price was not recorded.")
+            order_summary += f" as LIMIT @ {decimal_to_input_text(trader.prepared_limit_price)}"
+            if trader.market_reference_price is not None:
+                order_summary += f" from last {decimal_to_input_text(trader.market_reference_price)}"
+        elif args.order_type == "limit":
             order_summary += f" @ {decimal_to_input_text(args.limit_price)}"
 
         if not args.live and not args.fill_or_kill:
