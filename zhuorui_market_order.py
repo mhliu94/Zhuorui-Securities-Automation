@@ -3,8 +3,7 @@
 Submit Zhuorui orders through the Android emulator UI.
 
 Default behavior is a dry run: the script prepares the order ticket but does not
-tap the final trade button. Live submission requires both --live and
---confirm-live-order.
+tap the final trade button. Live submission requires --confirm-live-order.
 """
 
 from __future__ import annotations
@@ -42,17 +41,19 @@ FAST_SCREEN_SIZE = (1080, 2424)
 QUOTES_TAB_X_RATIO = 1 / 12
 ASSETS_TAB_X_RATIO = 0.25
 BOTTOM_TAB_Y_RATIO = 0.943
-TOP_SEARCH_X_RATIO = 0.85
-TOP_SEARCH_Y_RATIO = 0.0825
 APP_BACK_X_RATIO = 0.063
 APP_BACK_Y_RATIO = 0.082
 SUCCESS_REVOKE_X_RATIO = 0.29
 SUCCESS_REVOKE_Y_RATIO = 0.895
+WATCHLIST_SYMBOL_SCORE_THRESHOLD = 0.70
 POSITION_TABLE_MAX_SCROLLS = 8
 POSITION_LANDING_BACK_TAPS = 5
 POSITION_LANDING_BACK_DELAY = 1.0
+ORDER_WATCHLIST_BACK_TAPS = 3
+ORDER_WATCHLIST_BACK_DELAY = 1.0
 FILL_OR_KILL_REVOKE_DELAY = 3.0
 ANDROID_ROBOTO_FONT = "/system/fonts/Roboto-Regular.ttf"
+KEYCODE_ENTER = 66
 
 KNOWN_ADB_PATHS = [
     Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / "adb.exe",
@@ -675,6 +676,141 @@ class NumericOcr:
         return best_char
 
 
+class WatchlistSymbolMatcher:
+    def __init__(self, font_path: Path):
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            import numpy as np
+        except ImportError as exc:
+            raise ZhuoruiAutomationError(
+                "Pillow and numpy are required for screenshot-based watchlist symbol detection."
+            ) from exc
+
+        self.Image = Image
+        self.ImageDraw = ImageDraw
+        self.ImageFont = ImageFont
+        self.np = np
+        self.font_path = font_path
+
+    @classmethod
+    def from_adb(cls, adb: Adb, temp_dir: Path) -> "WatchlistSymbolMatcher":
+        font_path = temp_dir / "Roboto-Regular.ttf"
+        adb.pull(ANDROID_ROBOTO_FONT, font_path)
+        return cls(font_path)
+
+    def find_symbol(self, screenshot_path: Path, symbol: str) -> Optional[tuple[float, tuple[int, int]]]:
+        image = self.Image.open(screenshot_path).convert("RGB")
+        width, height = image.size
+        target = symbol.upper()
+        templates = self.render_target_templates(target)
+        best: Optional[tuple[float, tuple[int, int]]] = None
+        for line_top, line_bottom in self.symbol_line_runs(image):
+            crop = image.crop(
+                (
+                    round(width * 0.07),
+                    max(0, line_top - 8),
+                    round(width * 0.30),
+                    min(height, line_bottom + 8),
+                )
+            )
+            score = self.score_symbol_crop(crop, templates)
+            center_y = (line_top + line_bottom) // 2
+            tap_point = (round(width * 0.14), center_y)
+            if best is None or score > best[0]:
+                best = (score, tap_point)
+        if best and best[0] >= WATCHLIST_SYMBOL_SCORE_THRESHOLD:
+            return best
+        return None
+
+    def symbol_line_runs(self, image) -> list[tuple[int, int]]:
+        width, height = image.size
+        x_start = round(width * 0.02)
+        x_end = round(width * 0.23)
+        y_start = round(height * 0.25)
+        y_end = round(height * 0.90)
+        active_rows: list[int] = []
+        min_pixels = max(8, round((x_end - x_start) * 0.04))
+
+        for y in range(y_start, y_end):
+            count = 0
+            for x in range(x_start, x_end):
+                red, green, blue = image.getpixel((x, y))
+                brightness = (red + green + blue) / 3
+                if (
+                    brightness > 70
+                    and not (red > 245 and green > 245 and blue > 245)
+                    and not (abs(red - green) < 5 and abs(green - blue) < 5 and brightness < 100)
+                ):
+                    count += 1
+            if count >= min_pixels:
+                active_rows.append(y)
+
+        runs = contiguous_runs(active_rows)
+        text_runs = [
+            run
+            for run in runs
+            if 12 <= run[1] - run[0] + 1 <= 42
+        ]
+        symbol_runs: list[tuple[int, int]] = []
+        previous: Optional[tuple[int, int]] = None
+        for run in text_runs:
+            if previous is not None:
+                gap = run[0] - previous[1]
+                if 18 <= gap <= 65:
+                    symbol_runs.append(run)
+            previous = run
+        return symbol_runs
+
+    def render_target_templates(self, target: str) -> list[tuple[object, int, int, float]]:
+        templates: list[tuple[object, int, int, float]] = []
+        for size in range(18, 36):
+            font = self.ImageFont.truetype(str(self.font_path), size)
+            bbox = font.getbbox(target)
+            image = self.Image.new(
+                "L",
+                (max(1, bbox[2] - bbox[0]) + 8, max(1, bbox[3] - bbox[1]) + 8),
+                255,
+            )
+            draw = self.ImageDraw.Draw(image)
+            draw.text((4 - bbox[0], 4 - bbox[1]), target, font=font, fill=0)
+            array = self.np.array(image)
+            ys, xs = self.np.where(array < 220)
+            if len(xs) == 0:
+                continue
+            mask = (array[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1] < 220).astype(self.np.float32)
+            templates.append((mask, mask.shape[1], mask.shape[0], float(mask.sum())))
+        return templates
+
+    def score_symbol_crop(self, crop, templates: list[tuple[object, int, int, float]]) -> float:
+        array = self.np.array(crop.convert("RGB"))
+        mask = (
+            (array[:, :, 0] < 230)
+            | (array[:, :, 1] < 230)
+            | (array[:, :, 2] < 230)
+        ).astype(self.np.float32)
+        ys, xs = self.np.where(mask > 0)
+        if len(xs) == 0:
+            return -1.0
+        mask = mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+        padded = self.np.pad(mask, ((8, 8), (8, 8)), constant_values=0)
+        best = -1.0
+        for template, template_width, template_height, template_count in templates:
+            if template_count <= 0:
+                continue
+            if template_height > padded.shape[0] or template_width > padded.shape[1]:
+                continue
+            for y in range(0, padded.shape[0] - template_height + 1):
+                for x in range(0, padded.shape[1] - template_width + 1):
+                    patch = padded[y : y + template_height, x : x + template_width]
+                    intersection = float((patch * template).sum())
+                    missed = (template_count - intersection) / template_count
+                    extra = max(0.0, (float(patch.sum()) - intersection) / template_count)
+                    score = intersection / template_count - 0.2 * extra - 0.2 * missed
+                    if score > best:
+                        best = score
+        return best
+
+
 class ZhuoruiTrader:
     def __init__(
         self,
@@ -767,108 +903,6 @@ class ZhuoruiTrader:
                 return True
         return False
 
-    def open_symbol_search(self) -> list[UiNode]:
-        try:
-            nodes = self.current_nodes()
-        except ZhuoruiAutomationError:
-            return self.open_search_from_visible_top_bar()
-        if first_by_id(nodes, ":id/searchView"):
-            return nodes
-        if self.is_main_landing_page(nodes):
-            return self.open_search_from_landing_page()
-
-        # If a trade sheet or menu is open, close it first.
-        for _ in range(3):
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                return self.open_search_from_visible_top_bar()
-            if first_by_id(nodes, ":id/searchView"):
-                return nodes
-            if self.dismiss_transient_overlay(nodes):
-                continue
-            if first_by_id(nodes, ":id/imgClose"):
-                self.adb.tap_node(first_by_id(nodes, ":id/imgClose"))  # type: ignore[arg-type]
-                time.sleep(SHORT_SETTLE)
-                continue
-            if first_by_id(nodes, ":id/sbTrade") or first_by_id(nodes, ":id/recyclerView"):
-                self.adb.keyevent(4)
-                time.sleep(SHORT_SETTLE)
-                continue
-            break
-
-        # On a quote page opened from search, the top-left app back button
-        # returns directly to the search result screen.
-        try:
-            nodes = self.current_nodes()
-        except ZhuoruiAutomationError:
-            return self.open_search_from_visible_top_bar()
-        if self.is_quote_page(nodes):
-            width, height = self.adb.wm_size()
-            self.adb.tap(round(width * 0.06), round(height * 0.052))
-            deadline = time.monotonic() + min(self.wait_timeout, 2.5)
-            while time.monotonic() < deadline:
-                try:
-                    nodes = self.current_nodes()
-                except ZhuoruiAutomationError:
-                    time.sleep(FAST_POLL)
-                    continue
-                if first_by_id(nodes, ":id/searchView"):
-                    return nodes
-                if not self.is_quote_page(nodes):
-                    break
-                time.sleep(FAST_POLL)
-            else:
-                self.adb.keyevent(4)
-                time.sleep(SHORT_SETTLE)
-
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                return self.open_search_from_visible_top_bar()
-            if first_by_id(nodes, ":id/searchView"):
-                return nodes
-            if self.is_quote_page(nodes):
-                raise ZhuoruiAutomationError(
-                    "Could not leave Zhuorui's quote page to reach symbol search."
-                )
-
-        # Some Android builds route KEYCODE_SEARCH to the in-app search box.
-        self.adb.keyevent(84)
-        time.sleep(SHORT_SETTLE)
-        try:
-            nodes = self.current_nodes()
-        except ZhuoruiAutomationError:
-            return self.open_search_from_visible_top_bar()
-        if first_by_id(nodes, ":id/searchView"):
-            return nodes
-
-        return self.open_search_from_visible_top_bar()
-
-    def open_search_from_landing_page(self) -> list[UiNode]:
-        self.tap_ratio(QUOTES_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
-        time.sleep(0.2)
-        return self.open_search_from_visible_top_bar(timeout=min(self.wait_timeout, 2.0))
-
-    def open_search_from_visible_top_bar(self, timeout: Optional[float] = None) -> list[UiNode]:
-        wait_seconds = timeout if timeout is not None else self.wait_timeout
-        self.tap_ratio(TOP_SEARCH_X_RATIO, TOP_SEARCH_Y_RATIO)
-        deadline = time.monotonic() + wait_seconds
-        while time.monotonic() < deadline:
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                time.sleep(FAST_POLL)
-                continue
-            if first_by_id(nodes, ":id/searchView"):
-                return nodes
-            time.sleep(FAST_POLL)
-
-        raise ZhuoruiAutomationError(
-            "Could not reach Zhuorui's symbol search screen. Open the app search screen manually, "
-            "then run the script again, or use --assume-current-symbol from the desired quote page."
-        )
-
     def is_quote_page(self, nodes: list[UiNode]) -> bool:
         return bool(first_by_id(nodes, ":id/tvSubTitle")) and not first_by_id(nodes, ":id/searchView")
 
@@ -879,22 +913,58 @@ class ZhuoruiTrader:
         width, height = self.adb.wm_size()
         self.adb.tap(round(width * x_ratio), round(height * y_ratio))
 
-    def try_fast_search_symbol_from_landing(self, symbol: str) -> bool:
-        if not self.fast_path:
-            return False
+    def screenshot_shows_main_landing_page(self) -> bool:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            screenshot_path = Path(tmp.name)
         try:
-            nodes = self.current_nodes()
+            self.adb.screenshot(screenshot_path)
+            return self.image_shows_main_landing_page(screenshot_path)
         except ZhuoruiAutomationError:
             return False
-        if not self.is_main_landing_page(nodes) or self.is_quote_page(nodes):
+        finally:
+            try:
+                screenshot_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def image_shows_main_landing_page(self, screenshot_path: Path) -> bool:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise ZhuoruiAutomationError(
+                "Pillow is required for screenshot-based landing page detection."
+            ) from exc
+
+        image = Image.open(screenshot_path).convert("RGB")
+        width, height = image.size
+        bottom_band = image.crop((0, round(height * 0.90), width, round(height * 0.985)))
+        _, white_ratio, dark_ratio = self.image_region_stats(bottom_band)
+        if white_ratio < 0.62 or dark_ratio > 0.08:
             return False
-        self.tap_ratio(QUOTES_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
-        time.sleep(0.15)
-        self.tap_ratio(TOP_SEARCH_X_RATIO, TOP_SEARCH_Y_RATIO)
-        time.sleep(0.45)
-        self.adb.input_text(symbol.upper())
-        time.sleep(SHORT_SETTLE)
-        return True
+
+        label_band_top = round(height * 0.948)
+        label_band_bottom = round(height * 0.972)
+        segment_hits = 0
+        for index in range(6):
+            x0 = round(width * index / 6)
+            x1 = round(width * (index + 1) / 6)
+            if self.image_segment_has_bottom_tab_label(
+                image.crop((x0, label_band_top, x1, label_band_bottom))
+            ):
+                segment_hits += 1
+        return segment_hits >= 5
+
+    def image_segment_has_bottom_tab_label(self, image) -> bool:
+        data = image.tobytes()
+        nonwhite = 0
+        for index in range(0, len(data), 3):
+            red = data[index]
+            green = data[index + 1]
+            blue = data[index + 2]
+            if not (red > 245 and green > 245 and blue > 245):
+                nonwhite += 1
+        ratio = nonwhite / max(1, len(data) // 3)
+        return 0.015 <= ratio <= 0.095
 
     def tap_app_back_button(self) -> None:
         self.tap_ratio(APP_BACK_X_RATIO, APP_BACK_Y_RATIO)
@@ -1147,42 +1217,76 @@ class ZhuoruiTrader:
         width, height = self.adb.wm_size()
         self.adb.swipe(width // 2, round(height * 0.45), width // 2, round(height * 0.82), 450)
 
-    def search_symbol(self, symbol: str) -> None:
-        if self.try_fast_search_symbol_from_landing(symbol):
-            return
-        nodes = self.open_symbol_search()
-        search = first_by_id(nodes, ":id/searchView")
-        require(search is not None, "Search field not found.")
-        self.replace_text(search, symbol.upper(), clear_chars=max(20, len(search.text) + 5))
-        time.sleep(SHORT_SETTLE)
-
-    def select_symbol_result(self, symbol: str) -> None:
-        target = f"US {symbol.upper()}"
-        deadline = time.monotonic() + self.wait_timeout
-        last_symbols: list[str] = []
-        while time.monotonic() < deadline:
-            nodes = self.current_nodes()
-            last_symbols = [node.text for node in nodes if re.fullmatch(r"[A-Z]{2} .+", node.text)]
-            for code_node in nodes:
-                if code_node.text.upper() == target:
-                    row = self.row_container_for(code_node, nodes)
-                    self.adb.tap_node(row or code_node)
-                    self.wait_for_quote_page()
+    def open_symbol_from_watchlist(self, symbol: str) -> None:
+        self.return_to_watchlist_landing()
+        with tempfile.TemporaryDirectory(prefix="zhuorui-watchlist-") as temp_name:
+            temp_dir = Path(temp_name)
+            screenshot_path = temp_dir / "watchlist.png"
+            matcher = WatchlistSymbolMatcher.from_adb(self.adb, temp_dir)
+            for attempt in range(2):
+                self.tap_ratio(QUOTES_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
+                time.sleep(0.25 if attempt == 0 else 0.5)
+                self.adb.screenshot(screenshot_path)
+                match = matcher.find_symbol(screenshot_path, symbol)
+                if match:
+                    score, (x, y) = match
+                    if self.fast_path:
+                        print(
+                            f"Watchlist OCR matched {symbol.upper()} at score {score:.2f}; tapping row.",
+                            file=sys.stderr,
+                        )
+                    self.adb.tap(x, y)
+                    time.sleep(0.8)
                     return
-            time.sleep(FAST_POLL)
+            raise ZhuoruiAutomationError(
+                f"{symbol.upper()} was not found in the visible watchlist. "
+                "Add it to the watchlist and keep it visible without scrolling."
+            )
+
+    def return_to_watchlist_landing(self) -> None:
+        if self.screenshot_shows_main_landing_page():
+            return
+        for _ in range(ORDER_WATCHLIST_BACK_TAPS):
+            if self.screenshot_shows_navigation_drawer():
+                self.adb.keyevent(4)
+            else:
+                self.tap_app_back_button()
+            time.sleep(ORDER_WATCHLIST_BACK_DELAY)
+            if self.screenshot_shows_main_landing_page():
+                return
         raise ZhuoruiAutomationError(
-            f"Could not find exact US symbol result {target!r}. Visible symbol rows: {last_symbols[:8]}"
+            f"Could not return to Zhuorui's main watchlist screen after {ORDER_WATCHLIST_BACK_TAPS} back taps."
         )
 
-    def row_container_for(self, child: UiNode, nodes: list[UiNode]) -> Optional[UiNode]:
-        child_center_y = child.bounds.center[1]
-        rows = [
-            node
-            for node in nodes
-            if node.resource_id.endswith(":id/rl_stock")
-            and node.bounds.top <= child_center_y <= node.bounds.bottom
-        ]
-        return rows[0] if rows else None
+    def screenshot_shows_navigation_drawer(self) -> bool:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            screenshot_path = Path(tmp.name)
+        try:
+            self.adb.screenshot(screenshot_path)
+            return self.image_shows_navigation_drawer(screenshot_path)
+        except ZhuoruiAutomationError:
+            return False
+        finally:
+            try:
+                screenshot_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def image_shows_navigation_drawer(self, screenshot_path: Path) -> bool:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise ZhuoruiAutomationError(
+                "Pillow is required for screenshot-based drawer detection."
+            ) from exc
+
+        image = Image.open(screenshot_path).convert("RGB")
+        width, height = image.size
+        left_panel = image.crop((0, round(height * 0.05), round(width * 0.72), round(height * 0.90)))
+        right_scrim = image.crop((round(width * 0.80), round(height * 0.05), width, round(height * 0.90)))
+        left_average, left_white, _ = self.image_region_stats(left_panel)
+        right_average, _, right_dark = self.image_region_stats(right_scrim)
+        return left_average > 210 and left_white > 0.55 and (right_average < 170 or right_dark > 0.30)
 
     def wait_for_quote_page(self) -> None:
         deadline = time.monotonic() + self.wait_timeout
@@ -1418,18 +1522,38 @@ class ZhuoruiTrader:
 
     def set_limit_price(self, price: Decimal, nodes: Optional[list[UiNode]] = None) -> None:
         nodes = nodes or self.current_nodes()
-        price_input = self.price_input(nodes)
-        require(price_input is not None, "Limit price input not found.")
+        price_input = self.wait_for_ticket_input(self.price_input, "Limit price input not found.", nodes=nodes)
         price_text = decimal_to_input_text(price)
         self.replace_text(price_input, price_text, clear_chars=max(16, len(price_input.text) + 5))
+        self.press_keyboard_enter()
         self.restore_order_ticket_position("price", price_input)
 
-    def set_quantity(self, quantity: int, nodes: Optional[list[UiNode]] = None) -> None:
+    def set_quantity(
+        self,
+        quantity: int,
+        nodes: Optional[list[UiNode]] = None,
+        enter_presses_after_input: int = 0,
+    ) -> None:
         nodes = nodes or self.current_nodes()
-        quantity_input = self.quantity_input(nodes)
-        require(quantity_input is not None, "Quantity input not found.")
+        quantity_input = self.wait_for_ticket_input(self.quantity_input, "Quantity input not found.", nodes=nodes)
         self.replace_text(quantity_input, str(quantity), clear_chars=max(10, len(quantity_input.text) + 5))
+        self.press_keyboard_enter(enter_presses_after_input, delay_between=0.5)
         self.restore_order_ticket_position("quantity", quantity_input)
+
+    def wait_for_ticket_input(self, finder, message: str, nodes: Optional[list[UiNode]] = None) -> UiNode:
+        found = finder(nodes) if nodes is not None else None
+        if found:
+            return found
+        deadline = time.monotonic() + min(self.wait_timeout, 2.0)
+        last_visible: list[str] = []
+        while time.monotonic() < deadline:
+            nodes = self.current_nodes()
+            last_visible = [node.text for node in nodes if node.text]
+            found = finder(nodes)
+            if found:
+                return found
+            time.sleep(FAST_POLL)
+        raise ZhuoruiAutomationError(f"{message} Visible text: {last_visible[:12]}")
 
     def replace_text(self, node: UiNode, text: str, clear_chars: int = 20) -> None:
         self.adb.tap_node(node)
@@ -1439,6 +1563,15 @@ class ZhuoruiTrader:
         if text:
             self.adb.input_text(text)
             time.sleep(0.1)
+
+    def press_keyboard_enter(self, count: int = 1, delay_between: float = 0.0) -> None:
+        if count <= 0:
+            return
+        for index in range(count):
+            self.adb.keyevent(KEYCODE_ENTER)
+            if delay_between > 0 and index < count - 1:
+                time.sleep(delay_between)
+        time.sleep(SHORT_SETTLE)
 
     def focus_trade_password_boxes(self) -> None:
         width, height = self.adb.wm_size()
@@ -1571,10 +1704,12 @@ class ZhuoruiTrader:
 
     def restore_order_ticket_position(self, field_name: str, edited_input: UiNode) -> None:
         width, height = self.adb.wm_size()
+        if self.wait_for_ready_submit_button(timeout=0.35):
+            return
         if self.is_fast_screen():
             self.tap_left_of_ticket_input(edited_input, width, height)
-            time.sleep(SHORT_SETTLE)
-            return
+            if self.wait_for_ready_submit_button(timeout=0.6):
+                return
 
         label_id = {
             "price": ":id/tvOrderPriceTitle",
@@ -1640,6 +1775,21 @@ class ZhuoruiTrader:
         safe_y = min(max(input_y, round(height * 0.62)), round(height * 0.86))
         self.adb.tap(round(width * 0.10), safe_y)
 
+    def wait_for_ready_submit_button(self, timeout: float) -> Optional[UiNode]:
+        _, height = self.adb.wm_size()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                nodes = self.current_nodes()
+            except ZhuoruiAutomationError:
+                time.sleep(FAST_POLL)
+                continue
+            submit = first_by_id(nodes, ":id/sbTrade")
+            if submit and self.ticket_submit_button_ready(nodes, height):
+                return submit
+            time.sleep(FAST_POLL)
+        return None
+
     def ticket_submit_button_ready(self, nodes: list[UiNode], screen_height: int) -> bool:
         submit = first_by_id(nodes, ":id/sbTrade")
         order_type = first_by_id(nodes, ":id/tvOrderType")
@@ -1659,8 +1809,7 @@ class ZhuoruiTrader:
     ) -> None:
         self.prepared_submit = None
         if not assume_current_symbol:
-            self.search_symbol(symbol)
-            self.select_symbol_result(symbol)
+            self.open_symbol_from_watchlist(symbol)
         else:
             nodes = self.current_nodes()
             if not self.is_quote_page(nodes):
@@ -1671,7 +1820,8 @@ class ZhuoruiTrader:
         if order_type_name == "limit":
             require(limit_price is not None, "Limit orders require --limit-price.")
             self.set_limit_price(limit_price, nodes=ticket_nodes if self.is_fast_screen() else None)
-        self.set_quantity(quantity)
+        quantity_enter_presses = 3 if order_type_name == "limit" else 0
+        self.set_quantity(quantity, enter_presses_after_input=quantity_enter_presses)
         self.prepared_submit = self.verify_ticket_ready(side, quantity, order_type_name, limit_price)
 
     def verify_ticket_ready(
@@ -1696,15 +1846,16 @@ class ZhuoruiTrader:
                 f"Limit price is not set; UI shows {price.text if price else '<missing>'!r}.",
             )
         require(qty is not None and qty.text.replace(",", "") == str(quantity), "Quantity is not set.")
-        require(submit is not None and submit.clickable, f"Final {side} button is not available.")
+        _, height = self.adb.wm_size()
+        require(
+            submit is not None and self.ticket_submit_button_ready(nodes, height),
+            f"Final {side} button is not restored to the tappable position.",
+        )
         return submit
 
     def submit_prepared_order(self, password: Optional[str], dismiss_success: bool = True) -> None:
-        submit = self.prepared_submit
-        if submit is None:
-            nodes = self.current_nodes()
-            submit = first_by_id(nodes, ":id/sbTrade")
-        require(submit is not None, "Prepared order submit button not found.")
+        submit = self.wait_for_ready_submit_button(timeout=1.5)
+        require(submit is not None, "Prepared order submit button is not restored to the tappable position.")
         self.adb.tap_node(submit)
         self.handle_confirmation_flow(password=password, dismiss_success=dismiss_success)
 
@@ -2106,7 +2257,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--assume-current-symbol",
         action="store_true",
-        help="skip search and use the quote page currently open in the app",
+        help="skip watchlist navigation and use the quote page currently open in the app",
     )
     parser.add_argument(
         "--live",
