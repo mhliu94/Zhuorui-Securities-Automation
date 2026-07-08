@@ -1,0 +1,9 @@
+{
+  "trade_password": "replace-with-your-trade-password",
+  "adb": "C:\\Users\\mhliu\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
+  "device": "emulator-5554",
+  "screen_size": "1080x2424",
+  "fast_path": true,
+  "launch_app": false,
+  "wait_timeout": 4
+}

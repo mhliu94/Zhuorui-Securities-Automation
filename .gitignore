@@ -1,0 +1,20 @@
+# Local configuration / credentials
+config.json
+zhuorui_config.json
+.env
+.env.*
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Logs and emulator output
+*.log
+emulator-*.log
+
+# Screenshot and debug artifacts
+*.png
+zr-*.xml
