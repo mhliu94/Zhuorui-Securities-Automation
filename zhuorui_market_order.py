@@ -13,12 +13,14 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Iterable, Optional
@@ -68,9 +70,14 @@ ORDER_WATCHLIST_BACK_DELAY = 1.0
 FILL_OR_KILL_REVOKE_DELAY = 3.0
 ANDROID_ROBOTO_FONT = "/system/fonts/Roboto-Regular.ttf"
 KEYCODE_ENTER = 66
-MARKET_BUY_LIMIT_MULTIPLIER = Decimal("1.15")
-MARKET_SELL_LIMIT_MULTIPLIER = Decimal("0.85")
+MARKET_BUY_LIMIT_MULTIPLIER = Decimal("1.05")
+MARKET_SELL_LIMIT_MULTIPLIER = Decimal("0.95")
 MARKET_LIMIT_PRICE_QUANTUM = Decimal("0.0001")
+DEFAULT_KAFKA_COMMAND_TOPIC = "commands"
+DEFAULT_KAFKA_HOLDINGS_TOPIC = "holdings"
+DEFAULT_KAFKA_ORDER_STATUS_TOPIC = "order-status"
+DEFAULT_HOLDINGS_INTERVAL_SECONDS = 30.0
+DEFAULT_KAFKA_POLL_SECONDS = 1.0
 
 KNOWN_ADB_PATHS = [
     Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / "adb.exe",
@@ -1181,7 +1188,7 @@ class ZhuoruiTrader:
 
     def scroll_assets_to_position_bottom(self) -> None:
         width, height = self.adb.wm_size()
-        self.adb.swipe(width // 2, round(height * 0.84), width // 2, round(height * 0.34), 550)
+        self.adb.swipe(width // 2, round(height * 0.88), width // 2, round(height * 0.18), 700)
 
     def collect_visible_security_positions_once(self) -> list[dict[str, str]]:
         with tempfile.TemporaryDirectory(prefix="zhuorui-positions-") as temp_name:
@@ -2401,6 +2408,693 @@ def through_market_limit_price(last_price: Decimal, side: str) -> Decimal:
     return price
 
 
+@dataclass(frozen=True)
+class KafkaConfig:
+    bootstrap_servers: str
+    command_topic: str
+    holdings_topic: str
+    order_status_topic: str
+    group_id: str
+    client_id: str
+    server_id: str
+    auto_offset_reset: str
+    holdings_interval_seconds: float
+    poll_seconds: float
+    publish_order_status: bool = False
+
+
+@dataclass(frozen=True)
+class TradingCommand:
+    command_id: str
+    symbol: str
+    side: str
+    quantity: Optional[int]
+    order_type: str
+    limit_price: Optional[Decimal]
+    notional_usd: Optional[Decimal] = None
+
+
+@dataclass
+class AutomationRuntime:
+    config: dict
+    adb: "Adb"
+    trader: "ZhuoruiTrader"
+    trade_password: Optional[str]
+    launch_app: bool
+
+
+def nested_config(config: dict, key: str) -> dict:
+    value = config.get(key)
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ZhuoruiAutomationError(f"Config value {key} must be an object.")
+    return value
+
+
+def config_number(config: dict, key: str, default: float) -> float:
+    value = config.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ZhuoruiAutomationError(f"Config value {key} must be a number.") from exc
+
+
+def optional_config_int(config: dict, *keys: str) -> Optional[int]:
+    value: object = config
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ZhuoruiAutomationError(f"Config value {'.'.join(keys)} must be an integer.") from exc
+
+
+def read_config_string(config: dict, default: Optional[str], *keys: str) -> Optional[str]:
+    value = config_string(config, *keys)
+    return value if value is not None else default
+
+
+def load_kafka_config(args: argparse.Namespace, config: dict) -> KafkaConfig:
+    kafka = nested_config(config, "kafka")
+    server_id = (
+        args.server_id
+        or read_config_string(kafka, None, "server_id")
+        or read_config_string(config, None, "server_id")
+        or socket.gethostname()
+    )
+    bootstrap_servers = (
+        args.kafka_bootstrap_servers
+        or read_config_string(kafka, None, "bootstrap_servers")
+        or read_config_string(kafka, None, "server")
+        or read_config_string(config, None, "kafka_bootstrap_servers")
+    )
+    if not bootstrap_servers:
+        raise ZhuoruiAutomationError(
+            "Kafka bootstrap servers are required for server mode. "
+            "Pass --kafka-bootstrap-servers or set kafka.bootstrap_servers in config."
+        )
+    return KafkaConfig(
+        bootstrap_servers=bootstrap_servers,
+        command_topic=(
+            args.kafka_command_topic
+            or read_config_string(kafka, DEFAULT_KAFKA_COMMAND_TOPIC, "command_topic")
+            or DEFAULT_KAFKA_COMMAND_TOPIC
+        ),
+        holdings_topic=(
+            args.kafka_holdings_topic
+            or read_config_string(kafka, DEFAULT_KAFKA_HOLDINGS_TOPIC, "holdings_topic")
+            or DEFAULT_KAFKA_HOLDINGS_TOPIC
+        ),
+        order_status_topic=(
+            args.kafka_order_status_topic
+            or read_config_string(kafka, DEFAULT_KAFKA_ORDER_STATUS_TOPIC, "order_status_topic")
+            or DEFAULT_KAFKA_ORDER_STATUS_TOPIC
+        ),
+        group_id=(
+            args.kafka_group_id
+            or read_config_string(kafka, f"zhuorui-{server_id}", "group_id")
+            or f"zhuorui-{server_id}"
+        ),
+        client_id=(
+            args.kafka_client_id
+            or read_config_string(kafka, f"zhuorui-{server_id}", "client_id")
+            or f"zhuorui-{server_id}"
+        ),
+        server_id=server_id,
+        auto_offset_reset=(
+            args.kafka_auto_offset_reset
+            or read_config_string(kafka, "latest", "auto_offset_reset")
+            or "latest"
+        ),
+        holdings_interval_seconds=(
+            args.holdings_interval
+            if args.holdings_interval is not None
+            else config_number(kafka, "holdings_interval_seconds", DEFAULT_HOLDINGS_INTERVAL_SECONDS)
+        ),
+        poll_seconds=(
+            args.kafka_poll_seconds
+            if args.kafka_poll_seconds is not None
+            else config_number(kafka, "poll_seconds", DEFAULT_KAFKA_POLL_SECONDS)
+        ),
+        publish_order_status=config_bool(kafka, "publish_order_status", False),
+    )
+
+
+def build_automation_runtime(args: argparse.Namespace) -> AutomationRuntime:
+    config = load_config(args.config.expanduser())
+    adb_path = args.adb or config_string(config, "adb")
+    device = args.device or config_string(config, "device")
+    wait_timeout = args.wait_timeout if args.wait_timeout is not None else config_float(
+        config, "wait_timeout", DEFAULT_WAIT_TIMEOUT
+    )
+    artifact_dir = args.artifact_dir or config_path(config, "artifact_dir")
+    expected_screen_size = config_screen_size(config)
+    fast_path = config_bool(config, "fast_path", True) and not args.no_fast_path
+    launch_app = args.launch_app or config_bool(config, "launch_app", False)
+
+    adb = Adb(adb_path=adb_path, device=device, verbose=args.verbose)
+    if not args.no_stabilize_ui:
+        adb.disable_animations()
+    validate_screen_size(adb, expected_screen_size)
+    trader = ZhuoruiTrader(
+        adb,
+        wait_timeout=wait_timeout,
+        artifact_dir=artifact_dir,
+        fast_path=fast_path,
+    )
+    trade_password = (
+        getattr(args, "password", None)
+        or config_trade_password(config)
+        or os.environ.get("ZHUORUI_TRADE_PASSWORD")
+    )
+    return AutomationRuntime(
+        config=config,
+        adb=adb,
+        trader=trader,
+        trade_password=trade_password,
+        launch_app=launch_app,
+    )
+
+
+def json_default(value: object) -> object:
+    if isinstance(value, Decimal):
+        return decimal_to_input_text(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def kafka_value_serializer(value: dict) -> bytes:
+    return json.dumps(value, default=json_default, separators=(",", ":")).encode("utf-8")
+
+
+def kafka_value_deserializer(value: bytes) -> dict:
+    try:
+        decoded = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ZhuoruiAutomationError(f"Kafka command value must be a JSON object: {exc}") from exc
+    if not isinstance(decoded, dict):
+        raise ZhuoruiAutomationError("Kafka command value must be a JSON object.")
+    return decoded
+
+
+def command_text(payload: dict, *keys: str) -> Optional[str]:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return None
+
+
+def command_int(payload: dict, *keys: str) -> int:
+    value = command_text(payload, *keys)
+    if value is None:
+        raise ZhuoruiAutomationError(f"Command is missing one of: {', '.join(keys)}")
+    try:
+        return positive_int(value.replace(",", ""))
+    except argparse.ArgumentTypeError as exc:
+        raise ZhuoruiAutomationError(str(exc)) from exc
+
+
+def command_optional_int(payload: dict, *keys: str) -> Optional[int]:
+    value = command_text(payload, *keys)
+    if value is None:
+        return None
+    try:
+        return positive_int(value.replace(",", ""))
+    except argparse.ArgumentTypeError as exc:
+        raise ZhuoruiAutomationError(str(exc)) from exc
+
+
+def command_decimal(payload: dict, *keys: str) -> Optional[Decimal]:
+    value = command_text(payload, *keys)
+    if value is None:
+        return None
+    try:
+        return positive_decimal(value)
+    except argparse.ArgumentTypeError as exc:
+        raise ZhuoruiAutomationError(str(exc)) from exc
+
+
+def normalize_order_type(payload: dict) -> str:
+    raw_order_type = command_text(payload, "order_type", "type", "orderType")
+    raw_time_in_force = command_text(payload, "time_in_force", "tif", "timeInForce")
+    order_type = (raw_order_type or "market").strip().lower().replace("-", "_")
+    time_in_force = (raw_time_in_force or "").strip().lower().replace("-", "_")
+    aliases = {
+        "market": "market",
+        "market_order": "market",
+        "limit": "limit",
+        "limit_order": "limit",
+        "fok": "fok",
+        "fill_or_kill": "fok",
+        "limit_order_fok": "fok",
+    }
+    if order_type == "delayed_market_order":
+        raise ZhuoruiAutomationError("DELAYED_MARKET_ORDER is not supported by the Zhuorui listener yet.")
+    normalized = aliases.get(order_type)
+    if normalized is None:
+        raise ZhuoruiAutomationError(
+            f"Unsupported KTrader command type: {raw_order_type!r}. "
+            "Supported order commands are MARKET_ORDER, LIMIT_ORDER, and LIMIT_ORDER_FOK."
+        )
+    if normalized == "limit" and time_in_force in {"fok", "fill_or_kill"}:
+        return "fok"
+    return normalized
+
+
+def is_supported_order_payload(payload: dict) -> bool:
+    raw_order_type = command_text(payload, "order_type", "type", "orderType")
+    if not raw_order_type:
+        return True
+    normalized = raw_order_type.strip().lower().replace("-", "_")
+    if normalized in {
+        "market",
+        "market_order",
+        "limit",
+        "limit_order",
+        "fok",
+        "fill_or_kill",
+        "limit_order_fok",
+        "delayed_market_order",
+    }:
+        return True
+    return False
+
+
+def configured_account_id(config: dict) -> Optional[str]:
+    return (
+        config_string(config, "account_id")
+        or config_string(config, "account", "id")
+        or config_string(config, "account", "account_id")
+    )
+
+
+def command_targets_configured_account(payload: dict, config: dict) -> bool:
+    target_account_id = configured_account_id(config)
+    command_account_id = command_text(payload, "account_id", "accountId")
+    if command_account_id and target_account_id:
+        return command_account_id == target_account_id
+    return True
+
+
+def normalize_command(payload: dict) -> TradingCommand:
+    action = (command_text(payload, "action", "command") or "order").lower().replace("-", "_")
+    if action not in {"order", "place_order", "submit_order", "trade"}:
+        raise ZhuoruiAutomationError(f"Unsupported command action: {action}")
+
+    symbol = command_text(payload, "symbol", "ticker", "code")
+    if not symbol:
+        raise ZhuoruiAutomationError("Command is missing symbol.")
+    symbol = symbol.upper()
+    if not re.fullmatch(r"[A-Z0-9.=\-]{1,16}", symbol):
+        raise ZhuoruiAutomationError("Command symbol must be 1-16 characters: letters, numbers, dot, dash, or equals")
+
+    side = (command_text(payload, "side", "direction") or "").lower()
+    if side not in {"buy", "sell"}:
+        raise ZhuoruiAutomationError("Command side must be buy or sell.")
+
+    order_type = normalize_order_type(payload)
+    limit_price = command_decimal(payload, "limit_price", "price", "limitPrice", "limit")
+    quantity = command_optional_int(payload, "qty_shares", "quantity", "qty", "shares")
+    notional_usd = command_decimal(payload, "notional_usd", "notionalUsd", "dollar_amount", "dollars")
+    if order_type in {"limit", "fok"} and limit_price is None:
+        raise ZhuoruiAutomationError(f"{order_type.upper()} commands require limit_price.")
+    if order_type in {"limit", "fok"} and quantity is None:
+        raise ZhuoruiAutomationError(f"{order_type.upper()} commands require qty_shares.")
+    if order_type == "market" and limit_price is not None:
+        raise ZhuoruiAutomationError("Market commands cannot include limit_price.")
+    if order_type == "market" and quantity is None and notional_usd is None:
+        raise ZhuoruiAutomationError("MARKET_ORDER commands require qty_shares or notional_usd.")
+
+    command_id = command_text(payload, "id", "command_id", "commandId", "order_id", "orderId") or str(time.time_ns())
+    return TradingCommand(
+        command_id=command_id,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        order_type=order_type,
+        limit_price=limit_price,
+        notional_usd=notional_usd,
+    )
+
+
+def status_event(
+    kafka_config: KafkaConfig,
+    command: Optional[TradingCommand],
+    status: str,
+    message: str,
+    extra: Optional[dict] = None,
+) -> dict:
+    event = {
+        "server_id": kafka_config.server_id,
+        "status": status,
+        "message": message,
+        "timestamp": time.time(),
+    }
+    if command:
+        event.update(
+            {
+                "command_id": command.command_id,
+                "symbol": command.symbol,
+                "side": command.side,
+                "order_type": command.order_type,
+            }
+        )
+        if command.quantity is not None:
+            event["quantity"] = command.quantity
+        if command.notional_usd is not None:
+            event["notional_usd"] = command.notional_usd
+        if command.limit_price is not None:
+            event["limit_price"] = command.limit_price
+    if extra:
+        event.update(extra)
+    return event
+
+
+def publish_status(
+    producer: object,
+    kafka_config: KafkaConfig,
+    event: dict,
+    key: str,
+) -> None:
+    if not kafka_config.publish_order_status or not kafka_config.order_status_topic:
+        return
+    try:
+        producer.send(kafka_config.order_status_topic, event, key=key.encode("utf-8"))
+        producer.flush()
+    except Exception as exc:
+        print(f"WARNING: could not publish order status event: {exc}", file=sys.stderr)
+
+
+def command_log_summary(command: TradingCommand) -> str:
+    parts = [
+        f"id={command.command_id}",
+        f"type={command.order_type}",
+        f"side={command.side}",
+        f"symbol={command.symbol}",
+    ]
+    if command.quantity is not None:
+        parts.append(f"qty={command.quantity}")
+    if command.notional_usd is not None:
+        parts.append(f"notional_usd={decimal_to_input_text(command.notional_usd)}")
+    if command.limit_price is not None:
+        parts.append(f"limit_price={decimal_to_input_text(command.limit_price)}")
+    return " ".join(parts)
+
+
+def order_operation_name(order_type: str) -> str:
+    names = {
+        "market": "market order",
+        "limit": "limit order",
+        "fok": "fill-or-kill order",
+    }
+    return names.get(order_type, f"{order_type} order")
+
+
+def elapsed_seconds(started_at: float) -> float:
+    return time.monotonic() - started_at
+
+
+def quantity_from_notional(notional_usd: Decimal, reference_price: Decimal) -> int:
+    require(reference_price > 0, "Cannot resolve notional order quantity from a non-positive reference price.")
+    quantity = int((notional_usd / reference_price).to_integral_value(rounding=ROUND_FLOOR))
+    if quantity <= 0:
+        raise ZhuoruiAutomationError(
+            f"Notional order amount {decimal_to_input_text(notional_usd)} is too small "
+            f"for reference price {decimal_to_input_text(reference_price)}."
+        )
+    return quantity
+
+
+def submit_trading_command(trader: "ZhuoruiTrader", command: TradingCommand, trade_password: Optional[str]) -> dict:
+    operation_name = order_operation_name(command.order_type)
+    started_at = time.monotonic()
+    succeeded = False
+    if command.order_type == "fok":
+        app_order_type = "limit"
+        fill_or_kill = True
+    else:
+        app_order_type = command.order_type
+        fill_or_kill = False
+
+    try:
+        trader.ensure_app_foreground(launch_if_needed=True)
+        quantity = command.quantity
+        assume_current_symbol = False
+        notional_reference_price: Optional[Decimal] = None
+        if quantity is None:
+            require(
+                command.order_type == "market" and command.notional_usd is not None,
+                "Only MARKET_ORDER supports notional_usd without qty_shares.",
+            )
+            notional_reference_price = trader.open_symbol_from_watchlist(command.symbol) or trader.read_quote_last_price()
+            require(
+                notional_reference_price is not None,
+                "Could not OCR the last traded price needed to convert notional_usd to qty_shares.",
+            )
+            quantity = quantity_from_notional(command.notional_usd, notional_reference_price)
+            assume_current_symbol = True
+
+        trader.prepare_order(
+            symbol=command.symbol,
+            side=command.side,
+            quantity=quantity,
+            order_type_name=app_order_type,
+            limit_price=command.limit_price,
+            trade_password=trade_password,
+            assume_current_symbol=assume_current_symbol,
+        )
+        if fill_or_kill:
+            trader.submit_fill_or_kill_order(password=trade_password)
+        else:
+            trader.submit_prepared_order(password=trade_password)
+
+        result = {
+            "prepared_order_type": trader.prepared_order_type_name,
+            "resolved_quantity": quantity,
+            "submitted_limit_price": trader.prepared_limit_price,
+        }
+        if notional_reference_price is not None:
+            result["notional_reference_price"] = notional_reference_price
+        if trader.market_reference_price is not None:
+            result["market_reference_price"] = trader.market_reference_price
+        succeeded = True
+        return result
+    finally:
+        duration = elapsed_seconds(started_at)
+        if succeeded:
+            print(f"{operation_name.title()} completed in {duration:.3f} seconds.", flush=True)
+        else:
+            print(f"{operation_name.title()} failed after {duration:.3f} seconds.", file=sys.stderr, flush=True)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def decimal_text_to_float(value: object, default: float = 0.0) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def account_snapshot_config(config: dict, kafka_config: KafkaConfig) -> tuple[str, int, bool]:
+    account_id = configured_account_id(config)
+    if not account_id:
+        raise ZhuoruiAutomationError(
+            "Config value account_id is required for KTrader account-details snapshots."
+        )
+
+    account_num_id = (
+        optional_config_int(config, "account_num_id")
+        or optional_config_int(config, "account", "num_id")
+        or optional_config_int(config, "account", "numeric_id")
+        or optional_config_int(config, "account", "account_num_id")
+    )
+    if account_num_id is None:
+        raise ZhuoruiAutomationError(
+            "Config value account_num_id is required for KTrader account-details snapshots."
+        )
+    if account_num_id <= 0:
+        raise ZhuoruiAutomationError("Config value account_num_id must be a positive integer.")
+
+    trading_enabled = config_bool(config, "trading_enabled", True)
+    account_config = nested_config(config, "account")
+    if account_config:
+        trading_enabled = config_bool(account_config, "trading_enabled", trading_enabled)
+    return account_id, account_num_id, trading_enabled
+
+
+def ktrader_account_snapshot(config: dict, kafka_config: KafkaConfig, holdings: dict) -> dict:
+    account_id, account_num_id, trading_enabled = account_snapshot_config(config, kafka_config)
+    cash_by_currency = {
+        str(row.get("currency", "")).strip().upper(): decimal_text_to_float(row.get("amount"))
+        for row in holdings.get("cash", [])
+        if str(row.get("currency", "")).strip()
+    }
+    usd_cash = cash_by_currency.get("USD", 0.0)
+
+    positions = []
+    for row in holdings.get("securities", []):
+        symbol = str(row.get("symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        qty = decimal_text_to_float(row.get("quantity"))
+        if qty == 0.0:
+            continue
+        positions.append(
+            {
+                "symbol": symbol,
+                "qty": qty,
+                "avg_price": decimal_text_to_float(row.get("average_cost")),
+            }
+        )
+
+    return {
+        "account_id": account_id,
+        "account_num_id": account_num_id,
+        "cash": usd_cash,
+        "cash_by_currency": cash_by_currency,
+        "positions": positions,
+        "ts": utc_now_iso(),
+        "trading_enabled": trading_enabled,
+    }
+
+
+def publish_holdings(
+    producer: object,
+    topic: str,
+    kafka_config: KafkaConfig,
+    config: dict,
+    trader: "ZhuoruiTrader",
+) -> None:
+    started_at = time.monotonic()
+    holdings_collected = False
+    try:
+        trader.ensure_app_foreground(launch_if_needed=True)
+        holdings = trader.collect_positions()
+        holdings_collected = True
+    finally:
+        duration = elapsed_seconds(started_at)
+        if holdings_collected:
+            print(f"Holdings query completed in {duration:.3f} seconds.", flush=True)
+        else:
+            print(f"Holdings query failed after {duration:.3f} seconds.", file=sys.stderr, flush=True)
+    snapshot = ktrader_account_snapshot(config, kafka_config, holdings)
+    producer.send(
+        topic,
+        snapshot,
+        key=snapshot["account_id"].encode("utf-8"),
+    )
+    producer.flush()
+    print("Published account details message.")
+
+
+def run_trading_server(args: argparse.Namespace, runtime: AutomationRuntime) -> int:
+    kafka_config = load_kafka_config(args, runtime.config)
+    account_snapshot_config(runtime.config, kafka_config)
+    try:
+        from kafka import KafkaConsumer, KafkaProducer
+    except ImportError as exc:
+        raise ZhuoruiAutomationError(
+            "Server mode requires the kafka-python package. Install it with: pip install kafka-python"
+        ) from exc
+
+    producer = KafkaProducer(
+        bootstrap_servers=kafka_config.bootstrap_servers,
+        client_id=kafka_config.client_id,
+        value_serializer=kafka_value_serializer,
+    )
+    consumer = KafkaConsumer(
+        kafka_config.command_topic,
+        bootstrap_servers=kafka_config.bootstrap_servers,
+        client_id=kafka_config.client_id,
+        group_id=kafka_config.group_id,
+        auto_offset_reset=kafka_config.auto_offset_reset,
+        enable_auto_commit=True,
+    )
+
+    print(
+        f"Zhuorui trading server {kafka_config.server_id} consuming {kafka_config.command_topic} "
+        f"and publishing holdings to {kafka_config.holdings_topic}."
+    )
+    next_holdings_at = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= next_holdings_at:
+                try:
+                    publish_holdings(
+                        producer,
+                        kafka_config.holdings_topic,
+                        kafka_config,
+                        runtime.config,
+                        runtime.trader,
+                    )
+                    next_holdings_at = now + kafka_config.holdings_interval_seconds
+                except ZhuoruiAutomationError as exc:
+                    publish_status(
+                        producer,
+                        kafka_config,
+                        status_event(kafka_config, None, "holdings_error", str(exc)),
+                        key=kafka_config.server_id,
+                    )
+                    next_holdings_at = now + kafka_config.holdings_interval_seconds
+
+            records = consumer.poll(timeout_ms=max(1, int(kafka_config.poll_seconds * 1000)), max_records=1)
+            for messages in records.values():
+                for message in messages:
+                    command: Optional[TradingCommand] = None
+                    try:
+                        payload = kafka_value_deserializer(message.value)
+                        if not command_targets_configured_account(payload, runtime.config):
+                            continue
+                        if not is_supported_order_payload(payload):
+                            continue
+                        command = normalize_command(payload)
+                        print(f"Received trading command: {command_log_summary(command)}", flush=True)
+                        publish_status(
+                            producer,
+                            kafka_config,
+                            status_event(kafka_config, command, "accepted", "Command accepted."),
+                            key=command.command_id,
+                        )
+                        result = submit_trading_command(runtime.trader, command, runtime.trade_password)
+                        print(f"Submitted trading command: {command.command_id}", flush=True)
+                        publish_status(
+                            producer,
+                            kafka_config,
+                            status_event(kafka_config, command, "submitted", "Order submitted.", result),
+                            key=command.command_id,
+                        )
+                        next_holdings_at = 0.0
+                    except ZhuoruiAutomationError as exc:
+                        command_id = command.command_id if command else "<unparsed>"
+                        print(f"ERROR processing trading command {command_id}: {exc}", file=sys.stderr, flush=True)
+                        publish_status(
+                            producer,
+                            kafka_config,
+                            status_event(kafka_config, command, "error", str(exc)),
+                            key=command.command_id if command else kafka_config.server_id,
+                        )
+    except KeyboardInterrupt:
+        print("Stopping Zhuorui trading server.")
+        return 0
+    finally:
+        consumer.close()
+        producer.flush()
+        producer.close()
+
+
 def add_common_automation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config",
@@ -2446,9 +3140,52 @@ def parse_positions_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def add_kafka_server_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--server-id", help="trading server id included in Kafka events")
+    parser.add_argument("--kafka-bootstrap-servers", help="Kafka bootstrap servers, e.g. 127.0.0.1:9092")
+    parser.add_argument("--kafka-command-topic", help="Kafka topic to consume trading commands from")
+    parser.add_argument("--kafka-holdings-topic", help="Kafka topic to publish cash and positions to")
+    parser.add_argument("--kafka-order-status-topic", help="Kafka topic to publish order status events to")
+    parser.add_argument("--kafka-group-id", help="Kafka consumer group id")
+    parser.add_argument("--kafka-client-id", help="Kafka client id")
+    parser.add_argument(
+        "--kafka-auto-offset-reset",
+        choices=["earliest", "latest"],
+        help="where to start if the consumer group has no committed offset",
+    )
+    parser.add_argument(
+        "--holdings-interval",
+        type=float,
+        help="seconds between periodic holdings publications",
+    )
+    parser.add_argument(
+        "--kafka-poll-seconds",
+        type=float,
+        help="seconds to wait for commands between server loop ticks",
+    )
+
+
+def parse_server_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} server",
+        description="Run Zhuorui as a long-running Kafka trading server.",
+    )
+    add_common_automation_args(parser)
+    add_kafka_server_args(parser)
+    parser.add_argument("--password", help="trade password override; normally read from config")
+    args = parser.parse_args(argv)
+    args.command = "server"
+    return args
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     if argv and argv[0] in {"positions", "get-positions"}:
         return parse_positions_args(argv[1:])
+    if argv and argv[0] in {"server", "serve", "trading-server"}:
+        return parse_server_args(argv[1:])
+    if "--server" in argv:
+        server_argv = [value for value in argv if value != "--server"]
+        return parse_server_args(server_argv)
 
     parser = argparse.ArgumentParser(
         description="Prepare or submit a Zhuorui order through the Android emulator UI."
@@ -2460,7 +3197,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--order-type",
         choices=["market", "limit"],
         default="market",
-        help="order type to prepare; market is submitted as a 15%% through-market limit order",
+        help="order type to prepare; market is submitted as a 5%% through-market limit order",
     )
     parser.add_argument(
         "--limit-price",
@@ -2508,6 +3245,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if getattr(args, "command", "order") == "positions":
         return
+    if getattr(args, "command", "order") == "server":
+        if args.holdings_interval is not None and args.holdings_interval <= 0:
+            raise ZhuoruiAutomationError("--holdings-interval must be greater than zero")
+        if args.kafka_poll_seconds is not None and args.kafka_poll_seconds <= 0:
+            raise ZhuoruiAutomationError("--kafka-poll-seconds must be greater than zero")
+        return
     if not re.fullmatch(r"[A-Za-z0-9.=\-]{1,16}", args.symbol):
         raise ZhuoruiAutomationError("symbol must be 1-16 characters: letters, numbers, dot, dash, or equals")
     if args.order_type == "limit" and args.limit_price is None:
@@ -2541,60 +3284,40 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         validate_args(args)
-        config = load_config(args.config.expanduser())
-        adb_path = args.adb or config_string(config, "adb")
-        device = args.device or config_string(config, "device")
-        wait_timeout = args.wait_timeout if args.wait_timeout is not None else config_float(
-            config, "wait_timeout", DEFAULT_WAIT_TIMEOUT
-        )
-        artifact_dir = args.artifact_dir or config_path(config, "artifact_dir")
-        expected_screen_size = config_screen_size(config)
-        fast_path = config_bool(config, "fast_path", True) and not args.no_fast_path
-        launch_app = args.launch_app or config_bool(config, "launch_app", False)
+        runtime = build_automation_runtime(args)
 
-        adb = Adb(adb_path=adb_path, device=device, verbose=args.verbose)
-        if not args.no_stabilize_ui:
-            adb.disable_animations()
-        validate_screen_size(adb, expected_screen_size)
-        trader = ZhuoruiTrader(
-            adb,
-            wait_timeout=wait_timeout,
-            artifact_dir=artifact_dir,
-            fast_path=fast_path,
-        )
+        if args.command == "server":
+            return run_trading_server(args, runtime)
 
         if args.command == "positions":
-            trader.ensure_app_foreground(launch_if_needed=True)
-            positions = trader.collect_positions()
+            runtime.trader.ensure_app_foreground(launch_if_needed=True)
+            positions = runtime.trader.collect_positions()
             if args.compact_json:
                 print(json.dumps(positions, separators=(",", ":")))
             else:
                 print(json.dumps(positions, indent=2))
             return 0
 
-        trade_password = (
-            args.password
-            or config_trade_password(config)
-            or os.environ.get("ZHUORUI_TRADE_PASSWORD")
-        )
-
-        trader.ensure_app_foreground(launch_if_needed=launch_app or not args.assume_current_symbol)
-        trader.prepare_order(
+        runtime.trader.ensure_app_foreground(launch_if_needed=runtime.launch_app or not args.assume_current_symbol)
+        runtime.trader.prepare_order(
             symbol=args.symbol.upper(),
             side=args.side,
             quantity=args.quantity,
             order_type_name=args.order_type,
             limit_price=args.limit_price,
-            trade_password=trade_password,
+            trade_password=runtime.trade_password,
             assume_current_symbol=args.assume_current_symbol,
         )
 
         order_summary = f"{args.order_type.upper()} {args.side.upper()} {args.quantity} {args.symbol.upper()}"
         if args.order_type == "market":
-            require(trader.prepared_limit_price is not None, "Synthesized market-order limit price was not recorded.")
-            order_summary += f" as LIMIT @ {decimal_to_input_text(trader.prepared_limit_price)}"
-            if trader.market_reference_price is not None:
-                order_summary += f" from last {decimal_to_input_text(trader.market_reference_price)}"
+            require(
+                runtime.trader.prepared_limit_price is not None,
+                "Synthesized market-order limit price was not recorded.",
+            )
+            order_summary += f" as LIMIT @ {decimal_to_input_text(runtime.trader.prepared_limit_price)}"
+            if runtime.trader.market_reference_price is not None:
+                order_summary += f" from last {decimal_to_input_text(runtime.trader.market_reference_price)}"
         elif args.order_type == "limit":
             order_summary += f" @ {decimal_to_input_text(args.limit_price)}"
 
@@ -2606,11 +3329,11 @@ def main(argv: list[str]) -> int:
             return 0
 
         if args.fill_or_kill:
-            trader.submit_fill_or_kill_order(password=trade_password, revoke_delay=args.revoke_delay)
+            runtime.trader.submit_fill_or_kill_order(password=runtime.trade_password, revoke_delay=args.revoke_delay)
             print(f"Submitted {order_summary}, waited {args.revoke_delay:g}s, and tapped Revoke.")
             return 0
 
-        trader.submit_prepared_order(password=trade_password)
+        runtime.trader.submit_prepared_order(password=runtime.trade_password)
         print(f"Submitted {order_summary}.")
         return 0
     except ZhuoruiAutomationError as exc:

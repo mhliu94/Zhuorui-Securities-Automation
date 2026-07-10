@@ -1,9 +1,25 @@
 {
-  "trade_password": "replace-with-your-trade-password",
-  "adb": "C:\\Users\\mhliu\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
+  "trade_password": "wjy888",
+  "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
   "screen_size": "1080x2424",
   "fast_path": true,
   "launch_app": false,
-  "wait_timeout": 4
+  "wait_timeout": 4,
+  "server_id": "zhuorui-1",
+  "account_id": "ACC-ZHUORUI",
+  "account_num_id": 1,
+  "trading_enabled": true,
+  "kafka": {
+    "bootstrap_servers": "45.32.121.19:9092",
+    "command_topic": "trading-commands",
+    "holdings_topic": "account-details",
+    "order_status_topic": "order-status",
+    "publish_order_status": false,
+    "group_id": "zhuorui-trading-servers",
+    "client_id": "zhuorui-1",
+    "auto_offset_reset": "latest",
+    "holdings_interval_seconds": 120,
+    "poll_seconds": 1
+  }
 }
