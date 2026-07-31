@@ -1,5 +1,9 @@
 {
   "trade_password": "wjy888",
+  "login": {
+    "phone": "replace-with-phone-number",
+    "password": "replace-with-login-password"
+  },
   "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
   "screen_size": "1080x2424",

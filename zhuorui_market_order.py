@@ -20,7 +20,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Iterable, Optional
@@ -28,6 +28,13 @@ from typing import Iterable, Optional
 
 PACKAGE = "com.zhuorui.securities"
 LAUNCH_ACTIVITY = f"{PACKAGE}/.ui.SplashActivity"
+LOGGED_OUT_BOTTOM_TAB = "Open A/C"
+LOGGED_IN_BOTTOM_TAB = "Assets"
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+LOGIN_DELAY_START_HOUR = 9
+LOGIN_DELAY_END_HOUR = 16
+LOGIN_DELAY_SECONDS = 180.0
+LOGIN_ME_SWITCH_DELAY = 0.5
 REMOTE_DUMP = "/sdcard/codex-zhuorui-window.xml"
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_NAMES = ("zhuorui_config.json", "config.json")
@@ -194,6 +201,30 @@ def config_trade_password(config: dict) -> Optional[str]:
         or config_string(config, "trade", "password")
         or config_string(config, "password")
     )
+
+
+def config_login_phone(config: dict) -> Optional[str]:
+    return (
+        config_string(config, "login", "phone")
+        or config_string(config, "login", "phone_number")
+        or config_string(config, "login_phone")
+        or os.environ.get("ZHUORUI_LOGIN_PHONE")
+    )
+
+
+def config_login_password(config: dict) -> Optional[str]:
+    return (
+        config_string(config, "login", "password")
+        or config_string(config, "login_password")
+        or os.environ.get("ZHUORUI_LOGIN_PASSWORD")
+    )
+
+
+def login_delay_seconds(now: Optional[datetime] = None) -> float:
+    beijing_now = now.astimezone(BEIJING_TIMEZONE) if now is not None else datetime.now(BEIJING_TIMEZONE)
+    if LOGIN_DELAY_START_HOUR <= beijing_now.hour < LOGIN_DELAY_END_HOUR:
+        return LOGIN_DELAY_SECONDS
+    return 0.0
 
 
 @dataclass(frozen=True)
@@ -876,11 +907,15 @@ class ZhuoruiTrader:
         wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
         artifact_dir: Optional[Path] = None,
         fast_path: bool = True,
+        login_phone: Optional[str] = None,
+        login_password: Optional[str] = None,
     ):
         self.adb = adb
         self.wait_timeout = wait_timeout
         self.artifact_dir = artifact_dir
         self.fast_path = fast_path
+        self.login_phone = login_phone
+        self.login_password = login_password
         self.prepared_submit: Optional[UiNode] = None
         self.prepared_order_type_name: Optional[str] = None
         self.prepared_limit_price: Optional[Decimal] = None
@@ -1032,12 +1067,223 @@ class ZhuoruiTrader:
     def tap_app_back_button(self) -> None:
         self.tap_ratio(APP_BACK_X_RATIO, APP_BACK_Y_RATIO)
 
-    def is_main_landing_page(self, nodes: list[UiNode]) -> bool:
-        bottom_bar = first_by_id(nodes, ":id/bottomBar")
-        if bottom_bar:
+    def is_logged_out_landing_page(self, nodes: list[UiNode]) -> bool:
+        if not first_text(nodes, LOGGED_OUT_BOTTOM_TAB):
+            return False
+        if first_by_id(nodes, ":id/bottomBar"):
             return True
-        bottom_tabs = {"Quotes", "Assets", "S-Invest", "Wealth", "News", "Me"}
-        return len({node.text for node in nodes if node.text in bottom_tabs}) >= 3
+        logged_out_tabs = {"Quotes", "Open A/C", "S-Invest", "Wealth", "News", "Me"}
+        return len({node.text for node in nodes if node.text in logged_out_tabs}) >= 3
+
+    def is_main_landing_page(self, nodes: list[UiNode]) -> bool:
+        # Authentication state takes precedence over the generic bottom-bar shape.
+        if self.is_logged_out_landing_page(nodes):
+            return False
+        if first_by_id(nodes, ":id/bottomBar"):
+            return True
+        logged_in_tabs = {"Quotes", "Assets", "S-Invest", "Wealth", "News", "Me"}
+        return len({node.text for node in nodes if node.text in logged_in_tabs}) >= 3
+
+    def is_logged_in_landing_page(self, nodes: list[UiNode]) -> bool:
+        return (
+            bool(first_text(nodes, LOGGED_IN_BOTTOM_TAB))
+            and not first_text(nodes, LOGGED_OUT_BOTTOM_TAB)
+            and self.is_main_landing_page(nodes)
+        )
+
+    def ensure_logged_in(self, nodes: Optional[list[UiNode]] = None) -> None:
+        current = nodes if nodes is not None else self.current_nodes()
+        if not self.is_logged_out_landing_page(current):
+            return
+
+        print(
+            'Detected logged-out Zhuorui account (bottom bar contains "Open A/C").',
+            file=sys.stderr,
+            flush=True,
+        )
+        if not self.login_phone or not self.login_password:
+            raise ZhuoruiAutomationError(
+                "Zhuorui account is not logged in and login credentials are not configured. "
+                "Set login.phone and login.password in the config or use "
+                "ZHUORUI_LOGIN_PHONE and ZHUORUI_LOGIN_PASSWORD."
+            )
+
+        delay = login_delay_seconds()
+        if delay:
+            print(
+                "Beijing time is between 09:00 and 16:00; waiting 3 minutes before login.",
+                file=sys.stderr,
+                flush=True,
+            )
+            deadline = time.monotonic() + delay
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(30.0, remaining))
+            current = self.current_nodes()
+            if self.is_logged_in_landing_page(current):
+                return
+            if not self.is_logged_out_landing_page(current):
+                raise ZhuoruiAutomationError(
+                    "Zhuorui left the logged-out home page while waiting to log in; aborting automation."
+                )
+
+        self.login_from_landing_page(current)
+
+    def text_click_target(
+        self,
+        nodes: list[UiNode],
+        text: str,
+        *,
+        prefer_bottom: bool = False,
+    ) -> Optional[UiNode]:
+        targets: list[UiNode] = []
+        for text_node in nodes:
+            if text_node.text.strip().lower() != text.strip().lower():
+                continue
+            target = text_node if text_node.clickable else self.clickable_container_for(text_node, nodes)
+            targets.append(target or text_node)
+        if not targets:
+            return None
+        targets.sort(key=lambda node: node.bounds.center[1], reverse=prefer_bottom)
+        return targets[0]
+
+    def wait_for_text(self, text: str, timeout: Optional[float] = None) -> list[UiNode]:
+        deadline = time.monotonic() + (timeout if timeout is not None else self.wait_timeout)
+        while time.monotonic() < deadline:
+            nodes = self.current_nodes()
+            if self.text_click_target(nodes, text):
+                return nodes
+            time.sleep(FAST_POLL)
+        raise ZhuoruiAutomationError(f'Login flow could not find "{text}".')
+
+    def login_from_landing_page(self, nodes: list[UiNode]) -> None:
+        me = self.text_click_target(nodes, "Me", prefer_bottom=True)
+        if not me:
+            raise ZhuoruiAutomationError('Login flow could not find the "Me" bottom tab.')
+        self.adb.tap_node(me)
+        time.sleep(LOGIN_ME_SWITCH_DELAY)
+
+        nodes = self.wait_for_text("Login/Sign Up")
+        login_link = self.text_click_target(nodes, "Login/Sign Up")
+        require(login_link is not None, 'Login flow could not find the top "Login/Sign Up" link.')
+        self.adb.tap_node(login_link)
+
+        nodes = self.wait_for_text("Password Login")
+        password_login = self.text_click_target(nodes, "Password Login")
+        require(password_login is not None, 'Login flow could not find "Password Login".')
+        self.adb.tap_node(password_login)
+
+        nodes = self.wait_for_login_inputs()
+        phone_input, password_input = self.find_login_inputs(nodes)
+        require(phone_input is not None, "Login flow could not find the phone number input.")
+        require(password_input is not None, "Login flow could not find the password input.")
+        self.replace_text(phone_input, self.login_phone or "", clear_chars=32)
+        self.replace_text(password_input, self.login_password or "", clear_chars=64)
+        self.adb.keyevent(4)  # Hide the keyboard so the large login button is visible.
+        time.sleep(SHORT_SETTLE)
+
+        nodes = self.current_nodes()
+        login_button = self.text_click_target(nodes, "Login/Sign Up", prefer_bottom=True)
+        require(login_button is not None, 'Login flow could not find the blue "Login/Sign Up" button.')
+        self.adb.tap_node(login_button)
+        self.complete_user_agreement_and_wait_for_login()
+
+    def find_login_inputs(self, nodes: list[UiNode]) -> tuple[Optional[UiNode], Optional[UiNode]]:
+        inputs = sorted(
+            (node for node in nodes if node.klass == "android.widget.EditText"),
+            key=lambda node: node.bounds.top,
+        )
+        password_input = next(
+            (
+                node
+                for node in inputs
+                if node.password
+                or "password" in f"{node.hint} {node.content_desc}".lower()
+            ),
+            None,
+        )
+        phone_input = next(
+            (
+                node
+                for node in inputs
+                if node is not password_input
+                and any(word in f"{node.hint} {node.content_desc}".lower() for word in ("phone", "mobile"))
+            ),
+            None,
+        )
+        if phone_input is None:
+            phone_input = next((node for node in inputs if node is not password_input), None)
+        if password_input is None:
+            password_input = next((node for node in reversed(inputs) if node is not phone_input), None)
+        return phone_input, password_input
+
+    def wait_for_login_inputs(self) -> list[UiNode]:
+        deadline = time.monotonic() + self.wait_timeout
+        while time.monotonic() < deadline:
+            nodes = self.current_nodes()
+            phone_input, password_input = self.find_login_inputs(nodes)
+            if phone_input and password_input:
+                return nodes
+            time.sleep(FAST_POLL)
+        raise ZhuoruiAutomationError("Login flow could not find the phone number and password inputs.")
+
+    def complete_user_agreement_and_wait_for_login(self) -> None:
+        deadline = time.monotonic() + max(10.0, self.wait_timeout)
+        agreement_confirmed = False
+        while time.monotonic() < deadline:
+            nodes = self.current_nodes()
+            if self.is_logged_in_landing_page(nodes):
+                print("Zhuorui login completed.", flush=True)
+                return
+
+            agreement_visible = any(
+                any_text_contains(nodes, word) for word in ("agreement", "terms", "privacy")
+            )
+            if not agreement_confirmed and agreement_visible:
+                for label in (
+                    "Agree",
+                    "I Agree",
+                    "Agree and Continue",
+                    "Agree & Continue",
+                    "Agree and Login",
+                    "Accept",
+                    "Confirm",
+                ):
+                    agree = self.text_click_target(nodes, label, prefer_bottom=True)
+                    if agree:
+                        self.adb.tap_node(agree)
+                        agreement_confirmed = True
+                        time.sleep(0.5)
+                        break
+                else:
+                    checkbox = next(
+                        (
+                            node
+                            for node in nodes
+                            if node.klass.endswith("CheckBox")
+                            or "checkbox" in node.resource_id.lower()
+                        ),
+                        None,
+                    )
+                    if checkbox:
+                        self.adb.tap_node(checkbox)
+                        time.sleep(SHORT_SETTLE)
+                        refreshed = self.current_nodes()
+                        login_button = self.text_click_target(
+                            refreshed,
+                            "Login/Sign Up",
+                            prefer_bottom=True,
+                        )
+                        if login_button:
+                            self.adb.tap_node(login_button)
+                            agreement_confirmed = True
+            time.sleep(FAST_POLL)
+
+        raise ZhuoruiAutomationError(
+            "Zhuorui login did not complete after submitting credentials and confirming the user agreement."
+        )
 
     def return_to_landing_page(self, max_taps: int = POSITION_LANDING_BACK_TAPS) -> None:
         for _ in range(max_taps):
@@ -1045,6 +1291,9 @@ class ZhuoruiTrader:
                 nodes = self.current_nodes()
             except ZhuoruiAutomationError:
                 nodes = []
+            if nodes and self.is_logged_out_landing_page(nodes):
+                self.ensure_logged_in(nodes)
+                return
             if nodes and self.is_main_landing_page(nodes):
                 return
             self.tap_app_back_button()
@@ -1052,7 +1301,11 @@ class ZhuoruiTrader:
 
     def return_to_landing_page_fast(self, max_taps: int = POSITION_LANDING_BACK_TAPS) -> None:
         for _ in range(max_taps):
-            if self.screenshot_shows_main_landing_page():
+            nodes = self.current_nodes()
+            if self.is_logged_out_landing_page(nodes):
+                self.ensure_logged_in(nodes)
+                return
+            if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
                 return
             if self.screenshot_shows_navigation_drawer():
                 self.adb.keyevent(4)
@@ -1062,7 +1315,11 @@ class ZhuoruiTrader:
         if self.screenshot_shows_navigation_drawer():
             self.adb.keyevent(4)
             time.sleep(SHORT_SETTLE)
-        if not self.screenshot_shows_main_landing_page():
+        nodes = self.current_nodes()
+        if self.is_logged_out_landing_page(nodes):
+            self.ensure_logged_in(nodes)
+            return
+        if not self.is_main_landing_page(nodes) and not self.screenshot_shows_main_landing_page():
             raise ZhuoruiAutomationError(
                 f"Could not return to Zhuorui's main screen after {max_taps} back taps."
             )
@@ -1373,7 +1630,11 @@ class ZhuoruiTrader:
             )
 
     def return_to_watchlist_landing(self) -> None:
-        if self.screenshot_shows_main_landing_page():
+        nodes = self.current_nodes()
+        if self.is_logged_out_landing_page(nodes):
+            self.ensure_logged_in(nodes)
+            return
+        if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
             return
         for _ in range(ORDER_WATCHLIST_BACK_TAPS):
             if self.screenshot_shows_navigation_drawer():
@@ -1381,7 +1642,11 @@ class ZhuoruiTrader:
             else:
                 self.tap_app_back_button()
             time.sleep(ORDER_WATCHLIST_BACK_DELAY)
-            if self.screenshot_shows_main_landing_page():
+            nodes = self.current_nodes()
+            if self.is_logged_out_landing_page(nodes):
+                self.ensure_logged_in(nodes)
+                return
+            if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
                 return
         raise ZhuoruiAutomationError(
             f"Could not return to Zhuorui's main watchlist screen after {ORDER_WATCHLIST_BACK_TAPS} back taps."
@@ -2568,6 +2833,8 @@ def build_automation_runtime(args: argparse.Namespace) -> AutomationRuntime:
         wait_timeout=wait_timeout,
         artifact_dir=artifact_dir,
         fast_path=fast_path,
+        login_phone=config_login_phone(config),
+        login_password=config_login_password(config),
     )
     trade_password = (
         getattr(args, "password", None)
@@ -3042,6 +3309,7 @@ def run_trading_server(args: argparse.Namespace, runtime: AutomationRuntime) -> 
                     )
                     next_holdings_at = now + kafka_config.holdings_interval_seconds
                 except ZhuoruiAutomationError as exc:
+                    print(f"ERROR publishing holdings: {exc}", file=sys.stderr, flush=True)
                     publish_status(
                         producer,
                         kafka_config,

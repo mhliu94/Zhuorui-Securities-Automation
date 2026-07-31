@@ -1,0 +1,7 @@
+﻿{
+    "pid":  6344,
+    "started_utc":  "2026-07-31T14:32:46.2086146Z",
+    "stdout":  "C:\\Users\\admin\\Documents\\projects\\Zhuorui-Securities-Automation\\logs\\zhuorui_listener_20260731T143246Z.out.log",
+    "stderr":  "C:\\Users\\admin\\Documents\\projects\\Zhuorui-Securities-Automation\\logs\\zhuorui_listener_20260731T143246Z.err.log",
+    "config":  "C:\\Users\\admin\\Documents\\projects\\Zhuorui-Securities-Automation\\zhuorui_config.json"
+}
