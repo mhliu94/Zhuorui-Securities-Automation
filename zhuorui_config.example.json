@@ -6,6 +6,7 @@
   },
   "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
+  "avd": "Pixel_10_2",
   "screen_size": "1080x2424",
   "fast_path": true,
   "launch_app": false,

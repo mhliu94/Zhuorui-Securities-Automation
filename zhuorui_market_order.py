@@ -59,9 +59,18 @@ FAST_TICKET_ORDER_TYPE_OPTIONS = {
 FAST_TICKET_PRICE_FIELD = (608, 1703)
 FAST_TICKET_QUANTITY_FIELD = (608, 1850)
 FAST_TICKET_SUBMIT_BUTTON = (820, 2266)
+FAST_QUOTES_TAB_RIGHT = (175, 2285)
 FAST_ASSETS_TAB = (270, 2285)
 FAST_NET_ASSETS_TILE_MIDDLE_LEFT = (170, 1300)
-QUOTES_TAB_X_RATIO = 1 / 12
+FAST_ASSETS_POSITIONS_SECTION_TAB = (165, 430)
+FAST_ASSETS_ORDERS_SECTION_TAB = (430, 430)
+FAST_ASSETS_TODAYS_ORDERS_TAB = (230, 558)
+FAST_ASSETS_FIRST_ORDER_ROW = (540, 760)
+FAST_ASSETS_ORDER_CANCEL_BUTTON = (412, 873)
+FAST_CANCEL_ORDER_CONFIRM_BUTTON = (745, 1355)
+# Tap just inside the right edge of the first bottom-bar tab. Tapping near
+# the left edge can accidentally open Android's side menu.
+QUOTES_TAB_RIGHT_X_RATIO = (1 / 6) - 0.005
 ASSETS_TAB_X_RATIO = 0.25
 BOTTOM_TAB_Y_RATIO = 0.943
 APP_BACK_X_RATIO = 0.063
@@ -69,12 +78,17 @@ APP_BACK_Y_RATIO = 0.082
 SUCCESS_REVOKE_X_RATIO = 0.29
 SUCCESS_REVOKE_Y_RATIO = 0.895
 WATCHLIST_SYMBOL_SCORE_THRESHOLD = 0.70
+HOME_SCREEN_REQUIRED_LABELS = ("Quotes", "Assets", "S-Invest", "Wealth", "News")
+HOME_SCREEN_LABEL_SCORE_THRESHOLD = 0.48
+EMPTY_POSITIONS_LABEL = "No positions yet"
 POSITION_TABLE_MAX_SCROLLS = 8
-POSITION_LANDING_BACK_TAPS = 3
-POSITION_LANDING_BACK_DELAY = 1.0
-ORDER_WATCHLIST_BACK_TAPS = 3
-ORDER_WATCHLIST_BACK_DELAY = 1.0
+POSITION_LANDING_BACK_TAPS = 5
+POSITION_LANDING_BACK_DELAY = 0.45
+ORDER_WATCHLIST_BACK_TAPS = 5
+ORDER_WATCHLIST_BACK_DELAY = 0.45
 FILL_OR_KILL_REVOKE_DELAY = 3.0
+CANCEL_ORDER_SETTLE_SECONDS = 2.0
+MAX_CANCEL_ORDER_ATTEMPTS = 50
 ANDROID_ROBOTO_FONT = "/system/fonts/Roboto-Regular.ttf"
 KEYCODE_ENTER = 66
 MARKET_BUY_LIMIT_MULTIPLIER = Decimal("1.05")
@@ -900,6 +914,106 @@ class WatchlistSymbolMatcher:
         return best
 
 
+class HomeScreenTextOcr:
+    SEGMENT_COUNT = 6
+    LABEL_BANDS = ((0.946, 0.975), (0.938, 0.984))
+
+    def __init__(self, font_path: Path):
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            import numpy as np
+        except ImportError as exc:
+            raise ZhuoruiAutomationError(
+                "Pillow and numpy are required for screenshot-based home screen OCR."
+            ) from exc
+
+        self.Image = Image
+        self.ImageDraw = ImageDraw
+        self.ImageFont = ImageFont
+        self.np = np
+        self.font_path = font_path
+        self.templates = {
+            label: self.render_label_templates(label)
+            for label in HOME_SCREEN_REQUIRED_LABELS
+        }
+
+    @classmethod
+    def from_adb(cls, adb: Adb, temp_dir: Path) -> "HomeScreenTextOcr":
+        font_path = temp_dir / "Roboto-Regular.ttf"
+        adb.pull(ANDROID_ROBOTO_FONT, font_path)
+        return cls(font_path)
+
+    def recognize_home_text(self, screenshot_path: Path) -> str:
+        image = self.Image.open(screenshot_path).convert("RGB")
+        detected: list[str] = []
+        for index, label in enumerate(HOME_SCREEN_REQUIRED_LABELS):
+            score = self.score_expected_label(image, index, label)
+            if score >= HOME_SCREEN_LABEL_SCORE_THRESHOLD:
+                detected.append(label)
+        return " ".join(detected)
+
+    def score_expected_label(self, image, index: int, label: str) -> float:
+        width, height = image.size
+        x0 = round(width * index / self.SEGMENT_COUNT)
+        x1 = round(width * (index + 1) / self.SEGMENT_COUNT)
+        best = -1.0
+        for top_ratio, bottom_ratio in self.LABEL_BANDS:
+            crop = image.crop((x0, round(height * top_ratio), x1, round(height * bottom_ratio)))
+            score = self.score_text_crop(crop, self.templates[label])
+            if score > best:
+                best = score
+        return best
+
+    def render_label_templates(self, label: str) -> list[tuple[object, int, int, float]]:
+        templates: list[tuple[object, int, int, float]] = []
+        for size in range(12, 30):
+            font = self.ImageFont.truetype(str(self.font_path), size)
+            bbox = font.getbbox(label)
+            image = self.Image.new(
+                "L",
+                (max(1, bbox[2] - bbox[0]) + 8, max(1, bbox[3] - bbox[1]) + 8),
+                255,
+            )
+            draw = self.ImageDraw.Draw(image)
+            draw.text((4 - bbox[0], 4 - bbox[1]), label, font=font, fill=0)
+            array = self.np.array(image)
+            ys, xs = self.np.where(array < 220)
+            if len(xs) == 0:
+                continue
+            mask = (array[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1] < 220).astype(self.np.float32)
+            templates.append((mask, mask.shape[1], mask.shape[0], float(mask.sum())))
+        return templates
+
+    def score_text_crop(self, crop, templates: list[tuple[object, int, int, float]]) -> float:
+        array = self.np.array(crop.convert("RGB"))
+        mask = (
+            (array[:, :, 0] < 235)
+            | (array[:, :, 1] < 235)
+            | (array[:, :, 2] < 235)
+        ).astype(self.np.float32)
+        ys, xs = self.np.where(mask > 0)
+        if len(xs) == 0:
+            return -1.0
+        mask = mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+        padded = self.np.pad(mask, ((8, 8), (8, 8)), constant_values=0)
+        best = -1.0
+        for template, template_width, template_height, template_count in templates:
+            if template_count <= 0:
+                continue
+            if template_height > padded.shape[0] or template_width > padded.shape[1]:
+                continue
+            for y in range(0, padded.shape[0] - template_height + 1):
+                for x in range(0, padded.shape[1] - template_width + 1):
+                    patch = padded[y : y + template_height, x : x + template_width]
+                    intersection = float((patch * template).sum())
+                    missed = (template_count - intersection) / template_count
+                    extra = max(0.0, (float(patch.sum()) - intersection) / template_count)
+                    score = intersection / template_count - 0.2 * extra - 0.2 * missed
+                    if score > best:
+                        best = score
+        return best
+
+
 class ZhuoruiTrader:
     def __init__(
         self,
@@ -1010,20 +1124,27 @@ class ZhuoruiTrader:
         self.adb.tap(round(width * x_ratio), round(height * y_ratio))
 
     def screenshot_shows_main_landing_page(self) -> bool:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            screenshot_path = Path(tmp.name)
         try:
-            self.adb.screenshot(screenshot_path)
-            if self.image_shows_navigation_drawer(screenshot_path):
-                return False
-            return self.image_shows_main_landing_page(screenshot_path)
+            with tempfile.TemporaryDirectory(prefix="zhuorui-home-ocr-") as temp_name:
+                temp_dir = Path(temp_name)
+                screenshot_path = temp_dir / "home.png"
+                ocr = HomeScreenTextOcr.from_adb(self.adb, temp_dir)
+                self.adb.screenshot(screenshot_path)
+                text = self.home_screen_ocr_text(screenshot_path, ocr)
+                return self.home_screen_text_has_required_labels(text)
         except ZhuoruiAutomationError:
             return False
-        finally:
-            try:
-                screenshot_path.unlink()
-            except FileNotFoundError:
-                pass
+
+    def home_screen_ocr_text(self, screenshot_path: Path, ocr: HomeScreenTextOcr) -> str:
+        try:
+            if self.image_shows_navigation_drawer(screenshot_path):
+                return ""
+            return ocr.recognize_home_text(screenshot_path)
+        except ZhuoruiAutomationError:
+            return ""
+
+    def home_screen_text_has_required_labels(self, text: str) -> bool:
+        return all(label in text for label in HOME_SCREEN_REQUIRED_LABELS)
 
     def image_shows_main_landing_page(self, screenshot_path: Path) -> bool:
         try:
@@ -1286,43 +1407,66 @@ class ZhuoruiTrader:
         )
 
     def return_to_landing_page(self, max_taps: int = POSITION_LANDING_BACK_TAPS) -> None:
-        for _ in range(max_taps):
-            try:
-                nodes = self.current_nodes()
-            except ZhuoruiAutomationError:
-                nodes = []
-            if nodes and self.is_logged_out_landing_page(nodes):
-                self.ensure_logged_in(nodes)
-                return
-            if nodes and self.is_main_landing_page(nodes):
-                return
-            self.tap_app_back_button()
-            time.sleep(POSITION_LANDING_BACK_DELAY)
+        self.return_to_home_screen_by_back(
+            max_presses=max_taps,
+            delay=POSITION_LANDING_BACK_DELAY,
+            screen_name="Zhuorui's main screen",
+        )
 
     def return_to_landing_page_fast(self, max_taps: int = POSITION_LANDING_BACK_TAPS) -> None:
-        for _ in range(max_taps):
+        self.return_to_home_screen_by_back(
+            max_presses=max_taps,
+            delay=POSITION_LANDING_BACK_DELAY,
+            screen_name="Zhuorui's main screen",
+        )
+
+    def return_to_home_screen_by_back(
+        self,
+        max_presses: int = 5,
+        delay: float = 0.45,
+        screen_name: str = "Zhuorui's home screen",
+    ) -> None:
+        try:
             nodes = self.current_nodes()
-            if self.is_logged_out_landing_page(nodes):
-                self.ensure_logged_in(nodes)
-                return
-            if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
-                return
-            if self.screenshot_shows_navigation_drawer():
-                self.adb.keyevent(4)
-            else:
-                self.tap_app_back_button()
-            time.sleep(POSITION_LANDING_BACK_DELAY)
-        if self.screenshot_shows_navigation_drawer():
-            self.adb.keyevent(4)
-            time.sleep(SHORT_SETTLE)
-        nodes = self.current_nodes()
-        if self.is_logged_out_landing_page(nodes):
+        except ZhuoruiAutomationError:
+            nodes = []
+        if nodes and self.is_logged_out_landing_page(nodes):
             self.ensure_logged_in(nodes)
             return
-        if not self.is_main_landing_page(nodes) and not self.screenshot_shows_main_landing_page():
-            raise ZhuoruiAutomationError(
-                f"Could not return to Zhuorui's main screen after {max_taps} back taps."
-            )
+
+        last_text = ""
+        with tempfile.TemporaryDirectory(prefix="zhuorui-home-ocr-") as temp_name:
+            temp_dir = Path(temp_name)
+            screenshot_path = temp_dir / "home.png"
+            ocr = HomeScreenTextOcr.from_adb(self.adb, temp_dir)
+            for attempt in range(max_presses + 1):
+                try:
+                    nodes = self.current_nodes()
+                except ZhuoruiAutomationError:
+                    nodes = []
+                if nodes and self.is_logged_out_landing_page(nodes):
+                    self.ensure_logged_in(nodes)
+                    return
+
+                self.adb.screenshot(screenshot_path)
+                last_text = self.home_screen_ocr_text(screenshot_path, ocr)
+                if self.home_screen_text_has_required_labels(last_text) and self.current_screen_has_main_bottom_bar():
+                    return
+                if attempt >= max_presses:
+                    break
+                self.adb.keyevent(4)
+                time.sleep(delay)
+        required = ", ".join(HOME_SCREEN_REQUIRED_LABELS)
+        raise ZhuoruiAutomationError(
+            f"Could not return to {screen_name} after {max_presses} Back presses. "
+            f"Home OCR text must contain all of: {required}. Last OCR text: {last_text!r}"
+        )
+
+    def current_screen_has_main_bottom_bar(self) -> bool:
+        try:
+            return self.is_main_landing_page(self.current_nodes())
+        except ZhuoruiAutomationError:
+            return False
 
     def is_assets_page(self, nodes: list[UiNode]) -> bool:
         return bool(
@@ -1443,25 +1587,251 @@ class ZhuoruiTrader:
             return
         self.tap_ratio(ASSETS_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
 
+    def tap_quotes_tab_fast(self) -> None:
+        if self.is_fast_screen():
+            self.adb.tap(*FAST_QUOTES_TAB_RIGHT)
+            return
+        self.tap_ratio(QUOTES_TAB_RIGHT_X_RATIO, BOTTOM_TAB_Y_RATIO)
+
+    def tap_fast_point_or_ratio(self, fast_point: tuple[int, int], x_ratio: float, y_ratio: float) -> None:
+        if self.is_fast_screen():
+            self.adb.tap(*fast_point)
+            return
+        self.tap_ratio(x_ratio, y_ratio)
+
     def scroll_assets_to_position_bottom(self) -> None:
         width, height = self.adb.wm_size()
         self.adb.swipe(width // 2, round(height * 0.88), width // 2, round(height * 0.18), 700)
 
     def collect_visible_security_positions_once(self) -> list[dict[str, str]]:
+        nodes = self.current_nodes()
+        if self.empty_positions_visible(nodes):
+            return []
+
         with tempfile.TemporaryDirectory(prefix="zhuorui-positions-") as temp_name:
             temp_dir = Path(temp_name)
             ocr = NumericOcr.from_adb(self.adb, temp_dir)
             screenshot_path = temp_dir / "positions.png"
-            nodes = self.current_nodes()
             self.adb.screenshot(screenshot_path)
             securities = self.extract_visible_security_positions(nodes, screenshot_path, ocr)
         if not securities:
-            visible = [node.text for node in self.current_nodes() if node.text]
+            nodes = self.current_nodes()
+            if self.empty_positions_visible(nodes):
+                return []
+            visible = [node.text for node in nodes if node.text]
             raise ZhuoruiAutomationError(f"Positions table rows were not found. Visible text: {visible[:16]}")
         return securities
 
     def tap_net_assets_tile_fast(self) -> None:
         self.adb.tap(*FAST_NET_ASSETS_TILE_MIDDLE_LEFT)
+
+    def cancel_all_pending_orders(self, dry_run: bool = False) -> dict:
+        cancelled_count = 0
+        for _ in range(MAX_CANCEL_ORDER_ATTEMPTS):
+            self.open_today_orders_from_landing()
+            if not self.cancel_first_visible_pending_order(dry_run=dry_run):
+                self.tap_assets_positions_section_tab()
+                return {
+                    "cancelled_orders": cancelled_count,
+                    "dry_run": dry_run,
+                    "dry_run_confirmation_reached": False,
+                }
+            if dry_run:
+                self.tap_assets_positions_section_tab()
+                return {
+                    "cancelled_orders": cancelled_count,
+                    "dry_run": True,
+                    "dry_run_confirmation_reached": True,
+                }
+            cancelled_count += 1
+            time.sleep(CANCEL_ORDER_SETTLE_SECONDS)
+        self.tap_assets_positions_section_tab()
+        raise ZhuoruiAutomationError(
+            f"Stopped after cancelling {cancelled_count} order(s); "
+            "the Orders list still appeared cancellable."
+        )
+
+    def open_today_orders_from_landing(self) -> None:
+        self.return_to_landing_page_fast()
+        self.tap_quotes_tab_fast()
+        time.sleep(0.7)
+        self.tap_assets_tab_fast()
+        time.sleep(0.8)
+        self.scroll_assets_to_position_bottom()
+        time.sleep(0.7)
+        self.tap_assets_orders_section_tab()
+        time.sleep(0.35)
+        self.tap_assets_todays_orders_tab()
+        time.sleep(0.25)
+
+    def tap_assets_orders_section_tab(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_ASSETS_ORDERS_SECTION_TAB, 0.398, 0.177)
+
+    def tap_assets_positions_section_tab(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_ASSETS_POSITIONS_SECTION_TAB, 0.153, 0.177)
+        time.sleep(0.3)
+
+    def tap_assets_todays_orders_tab(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_ASSETS_TODAYS_ORDERS_TAB, 0.213, 0.230)
+
+    def tap_assets_first_order_row(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_ASSETS_FIRST_ORDER_ROW, 0.500, 0.314)
+
+    def tap_assets_order_cancel_button(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_ASSETS_ORDER_CANCEL_BUTTON, 0.381, 0.360)
+
+    def tap_cancel_order_confirm_button(self) -> None:
+        self.tap_fast_point_or_ratio(FAST_CANCEL_ORDER_CONFIRM_BUTTON, 0.690, 0.559)
+
+    def cancel_first_visible_pending_order(self, dry_run: bool = False) -> bool:
+        try:
+            nodes = self.current_nodes()
+        except ZhuoruiAutomationError:
+            nodes = []
+        cancel_button = self.find_visible_order_cancel_button(nodes)
+        if not cancel_button:
+            row = self.find_first_pending_order_row(nodes)
+            if row:
+                self.adb.tap_node(row)
+            else:
+                self.tap_assets_first_order_row()
+            time.sleep(0.3)
+            try:
+                nodes = self.current_nodes()
+            except ZhuoruiAutomationError:
+                nodes = []
+            cancel_button = self.find_visible_order_cancel_button(nodes)
+        if cancel_button:
+            self.adb.tap_node(cancel_button)
+        elif self.has_visible_pending_order(nodes):
+            self.tap_assets_order_cancel_button()
+        else:
+            return False
+        time.sleep(0.45)
+        return self.confirm_cancel_order_dialog(dry_run=dry_run)
+
+    def find_first_pending_order_row(self, nodes: list[UiNode]) -> Optional[UiNode]:
+        order_name = first_by_id(nodes, ":id/tvProductName")
+        if order_name:
+            row = self.clickable_container_for(order_name, nodes)
+            if row:
+                return row
+        pending = first_by_id(nodes, ":id/tvOrderStateDesc")
+        if pending and pending.text.strip().lower() == "pending":
+            row = self.clickable_container_for(pending, nodes)
+            if row:
+                return row
+        return None
+
+    def has_visible_pending_order(self, nodes: list[UiNode]) -> bool:
+        state = first_by_id(nodes, ":id/tvOrderStateDesc")
+        if state and state.text.strip().lower() == "pending":
+            return True
+        return bool(first_by_id(nodes, ":id/tvProductName"))
+
+    def find_visible_order_cancel_button(self, nodes: list[UiNode]) -> Optional[UiNode]:
+        _, height = self.adb.wm_size()
+        min_y = round(height * 0.68)
+        max_y = round(height * 0.92)
+        icon_cancel = first_by_id(nodes, ":id/fvOrderCancel")
+        if icon_cancel and icon_cancel.clickable:
+            return icon_cancel
+        for node in nodes:
+            text = self.node_label(node).strip().lower()
+            if text != "cancel":
+                continue
+            _, cy = node.bounds.center
+            if node.clickable and min_y <= cy <= max_y:
+                return node
+        for text_node in nodes:
+            text = self.node_label(text_node).strip().lower()
+            if text != "cancel":
+                continue
+            _, cy = text_node.bounds.center
+            if not (min_y <= cy <= max_y):
+                continue
+            parent = self.clickable_container_for(text_node, nodes)
+            if parent:
+                return parent
+            return text_node
+        return None
+
+    def confirm_cancel_order_dialog(self, dry_run: bool = False) -> bool:
+        deadline = time.monotonic() + min(self.wait_timeout, 4.0)
+        while time.monotonic() < deadline:
+            try:
+                nodes = self.current_nodes()
+            except ZhuoruiAutomationError:
+                time.sleep(FAST_POLL)
+                continue
+            if self.looks_cancel_order_confirmation(nodes):
+                if dry_run:
+                    self.dismiss_cancel_order_dialog(nodes)
+                    return True
+                confirm = self.find_cancel_order_confirm_button(nodes)
+                if confirm:
+                    self.adb.tap_node(confirm)
+                else:
+                    self.tap_cancel_order_confirm_button()
+                return True
+            if self.looks_error(nodes):
+                visible = [node.text for node in nodes if node.text]
+                raise ZhuoruiAutomationError(f"The app reported a cancellation error: {visible[:12]}")
+            time.sleep(FAST_POLL)
+        return False
+
+    def dismiss_cancel_order_dialog(self, nodes: list[UiNode]) -> None:
+        _, height = self.adb.wm_size()
+        min_y = round(height * 0.35)
+        max_y = round(height * 0.70)
+        for node in nodes:
+            text = self.node_label(node).strip().lower()
+            _, cy = node.bounds.center
+            if node.clickable and text == "cancel" and min_y <= cy <= max_y:
+                self.adb.tap_node(node)
+                time.sleep(SHORT_SETTLE)
+                return
+        for text_node in nodes:
+            text = self.node_label(text_node).strip().lower()
+            _, cy = text_node.bounds.center
+            if text != "cancel" or not (min_y <= cy <= max_y):
+                continue
+            parent = self.clickable_container_for(text_node, nodes)
+            if parent:
+                self.adb.tap_node(parent)
+            else:
+                self.adb.tap_node(text_node)
+            time.sleep(SHORT_SETTLE)
+            return
+        self.adb.keyevent(4)
+        time.sleep(SHORT_SETTLE)
+
+    def looks_cancel_order_confirmation(self, nodes: list[UiNode]) -> bool:
+        for node in nodes:
+            text = self.node_label(node).strip().lower()
+            if text == "cancel order" or "are you sure to cancel this order" in text:
+                return True
+        return False
+
+    def find_cancel_order_confirm_button(self, nodes: list[UiNode]) -> Optional[UiNode]:
+        _, height = self.adb.wm_size()
+        min_y = round(height * 0.35)
+        max_y = round(height * 0.70)
+        for node in nodes:
+            text = self.node_label(node).strip().lower()
+            _, cy = node.bounds.center
+            if node.clickable and text == "confirm" and min_y <= cy <= max_y:
+                return node
+        for text_node in nodes:
+            text = self.node_label(text_node).strip().lower()
+            _, cy = text_node.bounds.center
+            if text != "confirm" or not (min_y <= cy <= max_y):
+                continue
+            parent = self.clickable_container_for(text_node, nodes)
+            if parent:
+                return parent
+            return text_node
+        return None
 
     def collect_cash_positions(self, nodes: Optional[list[UiNode]] = None) -> list[dict[str, str]]:
         nodes = nodes or self.current_nodes()
@@ -1482,6 +1852,10 @@ class ZhuoruiTrader:
 
     def collect_security_positions(self, nodes: Optional[list[UiNode]] = None) -> list[dict[str, str]]:
         self.ensure_positions_visible(nodes)
+        nodes = self.current_nodes()
+        if self.empty_positions_visible(nodes):
+            return []
+
         positions: dict[tuple[str, str], dict[str, str]] = {}
         previous_signature: Optional[tuple[tuple[str, str], ...]] = None
 
@@ -1513,16 +1887,20 @@ class ZhuoruiTrader:
 
     def ensure_positions_visible(self, nodes: Optional[list[UiNode]] = None) -> None:
         nodes = nodes or self.open_assets()
-        if nodes_by_id(nodes, ":id/tvStockCode"):
+        if nodes_by_id(nodes, ":id/tvStockCode") or self.empty_positions_visible(nodes):
             return
         for _ in range(4):
             self.scroll_assets_content()
             time.sleep(0.35)
             nodes = self.current_nodes()
-            if nodes_by_id(nodes, ":id/tvStockCode"):
+            if nodes_by_id(nodes, ":id/tvStockCode") or self.empty_positions_visible(nodes):
                 return
         visible = [node.text for node in nodes if node.text]
         raise ZhuoruiAutomationError(f"Positions table rows were not found. Visible text: {visible[:12]}")
+
+    def empty_positions_visible(self, nodes: Iterable[UiNode]) -> bool:
+        expected = EMPTY_POSITIONS_LABEL.casefold()
+        return any(node.text.strip().casefold() == expected for node in nodes if node.text)
 
     def extract_visible_security_positions(
         self,
@@ -1605,7 +1983,7 @@ class ZhuoruiTrader:
             matcher = WatchlistSymbolMatcher.from_adb(self.adb, temp_dir)
             price_ocr = NumericOcr(matcher.font_path)
             for attempt in range(2):
-                self.tap_ratio(QUOTES_TAB_X_RATIO, BOTTOM_TAB_Y_RATIO)
+                self.tap_quotes_tab_fast()
                 time.sleep(0.25 if attempt == 0 else 0.5)
                 self.adb.screenshot(screenshot_path)
                 match = matcher.find_symbol(screenshot_path, symbol, price_ocr=price_ocr)
@@ -1630,26 +2008,10 @@ class ZhuoruiTrader:
             )
 
     def return_to_watchlist_landing(self) -> None:
-        nodes = self.current_nodes()
-        if self.is_logged_out_landing_page(nodes):
-            self.ensure_logged_in(nodes)
-            return
-        if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
-            return
-        for _ in range(ORDER_WATCHLIST_BACK_TAPS):
-            if self.screenshot_shows_navigation_drawer():
-                self.adb.keyevent(4)
-            else:
-                self.tap_app_back_button()
-            time.sleep(ORDER_WATCHLIST_BACK_DELAY)
-            nodes = self.current_nodes()
-            if self.is_logged_out_landing_page(nodes):
-                self.ensure_logged_in(nodes)
-                return
-            if self.is_main_landing_page(nodes) or self.screenshot_shows_main_landing_page():
-                return
-        raise ZhuoruiAutomationError(
-            f"Could not return to Zhuorui's main watchlist screen after {ORDER_WATCHLIST_BACK_TAPS} back taps."
+        self.return_to_home_screen_by_back(
+            max_presses=ORDER_WATCHLIST_BACK_TAPS,
+            delay=ORDER_WATCHLIST_BACK_DELAY,
+            screen_name="Zhuorui's main watchlist screen",
         )
 
     def read_quote_last_price(self) -> Optional[Decimal]:
@@ -2699,6 +3061,11 @@ class TradingCommand:
     notional_usd: Optional[Decimal] = None
 
 
+@dataclass(frozen=True)
+class CancelCommand:
+    command_id: str
+
+
 @dataclass
 class AutomationRuntime:
     config: dict
@@ -2908,11 +3275,66 @@ def command_decimal(payload: dict, *keys: str) -> Optional[Decimal]:
         raise ZhuoruiAutomationError(str(exc)) from exc
 
 
+def normalize_command_value(value: str) -> str:
+    with_camel_breaks = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
+    return re.sub(r"[^A-Za-z0-9]+", "_", with_camel_breaks).strip("_").lower()
+
+
+CANCEL_COMMAND_TYPES = {
+    "cancel",
+    "cancel_all",
+    "cancel_order",
+    "cancel_orders",
+    "cancel_open_order",
+    "cancel_open_orders",
+    "cancel_pending_order",
+    "cancel_pending_orders",
+    "cancel_all_orders",
+    "cancel_all_open_orders",
+    "cancel_all_pending_order",
+    "cancel_all_pending_orders",
+}
+
+
+def normalized_command_values(payload: dict) -> list[str]:
+    values: list[str] = []
+    for key in (
+        "action",
+        "cmd",
+        "command",
+        "type",
+        "command_type",
+        "commandType",
+        "event",
+        "event_type",
+        "eventType",
+        "order_type",
+        "orderType",
+        "request_type",
+        "requestType",
+    ):
+        value = command_text(payload, key)
+        if value:
+            values.append(normalize_command_value(value))
+    return values
+
+
+def is_cancel_command_payload(payload: dict) -> bool:
+    return any(value in CANCEL_COMMAND_TYPES for value in normalized_command_values(payload))
+
+
+def normalize_cancel_command(payload: dict) -> CancelCommand:
+    if not is_cancel_command_payload(payload):
+        raise ZhuoruiAutomationError("Command is not a cancel command.")
+    command_id = command_text(payload, "id", "command_id", "commandId", "order_id", "orderId") or str(time.time_ns())
+    return CancelCommand(command_id=command_id)
+
+
 def normalize_order_type(payload: dict) -> str:
     raw_order_type = command_text(payload, "order_type", "type", "orderType")
     raw_time_in_force = command_text(payload, "time_in_force", "tif", "timeInForce")
-    order_type = (raw_order_type or "market").strip().lower().replace("-", "_")
-    time_in_force = (raw_time_in_force or "").strip().lower().replace("-", "_")
+    order_type = normalize_command_value(raw_order_type or "market")
+    time_in_force = normalize_command_value(raw_time_in_force or "")
     aliases = {
         "market": "market",
         "market_order": "market",
@@ -2939,7 +3361,7 @@ def is_supported_order_payload(payload: dict) -> bool:
     raw_order_type = command_text(payload, "order_type", "type", "orderType")
     if not raw_order_type:
         return True
-    normalized = raw_order_type.strip().lower().replace("-", "_")
+    normalized = normalize_command_value(raw_order_type)
     if normalized in {
         "market",
         "market_order",
@@ -2954,6 +3376,10 @@ def is_supported_order_payload(payload: dict) -> bool:
     return False
 
 
+def is_supported_command_payload(payload: dict) -> bool:
+    return is_cancel_command_payload(payload) or is_supported_order_payload(payload)
+
+
 def configured_account_id(config: dict) -> Optional[str]:
     return (
         config_string(config, "account_id")
@@ -2962,11 +3388,50 @@ def configured_account_id(config: dict) -> Optional[str]:
     )
 
 
+def configured_account_num_id(config: dict) -> Optional[int]:
+    return (
+        optional_config_int(config, "account_num_id")
+        or optional_config_int(config, "account", "num_id")
+        or optional_config_int(config, "account", "numeric_id")
+        or optional_config_int(config, "account", "account_num_id")
+    )
+
+
+def account_selector_matches(command_value: str, account_id: Optional[str], account_num_id: Optional[int]) -> bool:
+    normalized = command_value.strip()
+    if account_id and normalized == account_id:
+        return True
+    if account_num_id is not None and normalized == str(account_num_id):
+        return True
+    return False
+
+
+def account_num_selector_matches(command_value: str, account_num_id: Optional[int]) -> bool:
+    if account_num_id is None:
+        return False
+    try:
+        return int(command_value.strip()) == account_num_id
+    except ValueError:
+        return False
+
+
 def command_targets_configured_account(payload: dict, config: dict) -> bool:
     target_account_id = configured_account_id(config)
-    command_account_id = command_text(payload, "account_id", "accountId")
-    if command_account_id and target_account_id:
-        return command_account_id == target_account_id
+    target_account_num_id = configured_account_num_id(config)
+    command_account_id = command_text(payload, "account_id", "accountId", "account")
+    if command_account_id and not account_selector_matches(command_account_id, target_account_id, target_account_num_id):
+        return False
+    command_account_num_id = command_text(
+        payload,
+        "account_num_id",
+        "accountNumId",
+        "account_numeric_id",
+        "accountNumericId",
+        "account_num",
+        "accountNum",
+    )
+    if command_account_num_id and not account_num_selector_matches(command_account_num_id, target_account_num_id):
+        return False
     return True
 
 
@@ -3013,7 +3478,7 @@ def normalize_command(payload: dict) -> TradingCommand:
 
 def status_event(
     kafka_config: KafkaConfig,
-    command: Optional[TradingCommand],
+    command: Optional[TradingCommand | CancelCommand],
     status: str,
     message: str,
     extra: Optional[dict] = None,
@@ -3024,7 +3489,14 @@ def status_event(
         "message": message,
         "timestamp": time.time(),
     }
-    if command:
+    if isinstance(command, CancelCommand):
+        event.update(
+            {
+                "command_id": command.command_id,
+                "order_type": "cancel",
+            }
+        )
+    elif command:
         event.update(
             {
                 "command_id": command.command_id,
@@ -3161,6 +3633,41 @@ def submit_trading_command(trader: "ZhuoruiTrader", command: TradingCommand, tra
             print(f"{operation_name.title()} failed after {duration:.3f} seconds.", file=sys.stderr, flush=True)
 
 
+def submit_cancel_command(trader: "ZhuoruiTrader", command: CancelCommand, dry_run: bool = False) -> dict:
+    started_at = time.monotonic()
+    succeeded = False
+    cancelled_orders = 0
+    result: dict = {
+        "cancelled_orders": 0,
+        "dry_run": dry_run,
+        "dry_run_confirmation_reached": False,
+    }
+    try:
+        trader.ensure_app_foreground(launch_if_needed=True)
+        result = trader.cancel_all_pending_orders(dry_run=dry_run)
+        cancelled_orders = int(result.get("cancelled_orders", 0))
+        succeeded = True
+        return result
+    finally:
+        duration = elapsed_seconds(started_at)
+        if succeeded:
+            if dry_run:
+                reached = bool(result.get("dry_run_confirmation_reached"))
+                print(
+                    f"Cancel orders dry run completed in {duration:.3f} seconds; "
+                    f"confirmation_reached={reached}.",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Cancel orders completed in {duration:.3f} seconds; "
+                    f"cancelled {cancelled_orders} order(s).",
+                    flush=True,
+                )
+        else:
+            print(f"Cancel orders failed after {duration:.3f} seconds.", file=sys.stderr, flush=True)
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -3181,12 +3688,7 @@ def account_snapshot_config(config: dict, kafka_config: KafkaConfig) -> tuple[st
             "Config value account_id is required for KTrader account-details snapshots."
         )
 
-    account_num_id = (
-        optional_config_int(config, "account_num_id")
-        or optional_config_int(config, "account", "num_id")
-        or optional_config_int(config, "account", "numeric_id")
-        or optional_config_int(config, "account", "account_num_id")
-    )
+    account_num_id = configured_account_num_id(config)
     if account_num_id is None:
         raise ZhuoruiAutomationError(
             "Config value account_num_id is required for KTrader account-details snapshots."
@@ -3321,13 +3823,33 @@ def run_trading_server(args: argparse.Namespace, runtime: AutomationRuntime) -> 
             records = consumer.poll(timeout_ms=max(1, int(kafka_config.poll_seconds * 1000)), max_records=1)
             for messages in records.values():
                 for message in messages:
-                    command: Optional[TradingCommand] = None
+                    command: Optional[TradingCommand | CancelCommand] = None
                     try:
                         payload = kafka_value_deserializer(message.value)
                         if not command_targets_configured_account(payload, runtime.config):
                             continue
-                        if not is_supported_order_payload(payload):
+                        if not is_supported_command_payload(payload):
                             continue
+                        if is_cancel_command_payload(payload):
+                            command = normalize_cancel_command(payload)
+                            print(f"Received cancel command: id={command.command_id}", flush=True)
+                            publish_status(
+                                producer,
+                                kafka_config,
+                                status_event(kafka_config, command, "accepted", "Command accepted."),
+                                key=command.command_id,
+                            )
+                            result = submit_cancel_command(runtime.trader, command)
+                            print(f"Completed cancel command: {command.command_id}", flush=True)
+                            publish_status(
+                                producer,
+                                kafka_config,
+                                status_event(kafka_config, command, "submitted", "Cancel command completed.", result),
+                                key=command.command_id,
+                            )
+                            next_holdings_at = 0.0
+                            continue
+
                         command = normalize_command(payload)
                         print(f"Received trading command: {command_log_summary(command)}", flush=True)
                         publish_status(
@@ -3446,11 +3968,29 @@ def parse_server_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def parse_cancel_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} cancel",
+        description="Cancel all visible pending Zhuorui orders once through the Android emulator UI.",
+    )
+    add_common_automation_args(parser)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="navigate to the cancel confirmation, then dismiss it without confirming",
+    )
+    args = parser.parse_args(argv)
+    args.command = "cancel"
+    return args
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     if argv and argv[0] in {"positions", "get-positions"}:
         return parse_positions_args(argv[1:])
     if argv and argv[0] in {"server", "serve", "trading-server"}:
         return parse_server_args(argv[1:])
+    if argv and argv[0] in {"cancel", "cancel-orders", "cancel-open-orders"}:
+        return parse_cancel_args(argv[1:])
     if "--server" in argv:
         server_argv = [value for value in argv if value != "--server"]
         return parse_server_args(server_argv)
@@ -3513,6 +4053,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if getattr(args, "command", "order") == "positions":
         return
+    if getattr(args, "command", "order") == "cancel":
+        return
     if getattr(args, "command", "order") == "server":
         if args.holdings_interval is not None and args.holdings_interval <= 0:
             raise ZhuoruiAutomationError("--holdings-interval must be greater than zero")
@@ -3564,6 +4106,18 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(positions, separators=(",", ":")))
             else:
                 print(json.dumps(positions, indent=2))
+            return 0
+
+        if args.command == "cancel":
+            result = submit_cancel_command(
+                runtime.trader,
+                CancelCommand(command_id="one-shot-cancel"),
+                dry_run=args.dry_run,
+            )
+            if args.dry_run:
+                print(f"Dry run confirmation reached: {result['dry_run_confirmation_reached']}.")
+            else:
+                print(f"Cancelled {result['cancelled_orders']} order(s).")
             return 0
 
         runtime.trader.ensure_app_foreground(launch_if_needed=runtime.launch_app or not args.assume_current_symbol)

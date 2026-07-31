@@ -40,8 +40,11 @@ if (Test-Path $PidPath) {
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
+$ProjectPy = Join-Path $Root ".venv\Scripts\python.exe"
 $BundledPy = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-if (Test-Path $BundledPy) {
+if (Test-Path $ProjectPy) {
+    $PythonExe = $ProjectPy
+} elseif (Test-Path $BundledPy) {
     $PythonExe = $BundledPy
 } else {
     $PythonCmd = Get-Command python -ErrorAction SilentlyContinue
