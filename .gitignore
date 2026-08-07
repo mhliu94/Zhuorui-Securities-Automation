@@ -16,6 +16,10 @@ env/
 emulator-*.log
 zhuorui_listener.pid
 zhuorui_listener.current.json
+zhuorui_monitor.pid
+zhuorui_monitor.current.json
+zhuorui_emulator.current.json
+certs/
 
 # Screenshot and debug artifacts
 *.png

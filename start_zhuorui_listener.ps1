@@ -27,15 +27,31 @@ if (Test-Path $PidPath) {
     if ($ExistingPid -match '^\d+$') {
         $ExistingProcess = Get-Process -Id ([int]$ExistingPid) -ErrorAction SilentlyContinue
         if ($ExistingProcess) {
-            Write-Host "Zhuorui listener is already running with PID $ExistingPid."
+            $ExistingIsListener = $false
+            $CurrentRun = $null
             if (Test-Path $CurrentRunPath) {
-                $CurrentRun = Get-Content $CurrentRunPath -Raw | ConvertFrom-Json
+                try {
+                    $CurrentRun = Get-Content $CurrentRunPath -Raw | ConvertFrom-Json
+                    $RecordedStart = ([datetime]$CurrentRun.started_utc).ToUniversalTime()
+                    $ActualStart = $ExistingProcess.StartTime.ToUniversalTime()
+                    $ExistingIsListener = `
+                        ([int]$CurrentRun.pid -eq [int]$ExistingPid) -and `
+                        ([math]::Abs(($RecordedStart - $ActualStart).TotalSeconds) -le 30)
+                } catch {
+                    $ExistingIsListener = $false
+                }
+            }
+            if ($ExistingIsListener) {
+                Write-Host "Zhuorui listener is already running with PID $ExistingPid."
                 Write-Host "stdout: $($CurrentRun.stdout)"
                 Write-Host "stderr: $($CurrentRun.stderr)"
+                exit 0
             }
-            exit 0
+            Write-Host "Listener PID file was stale; process $ExistingPid was left untouched."
         }
     }
+    Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $CurrentRunPath -Force -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -58,6 +74,12 @@ if (Test-Path $ProjectPy) {
         $PythonExe = $PyCmd.Source
     }
 }
+
+# Some Windows hosts expose both Path and PATH. Start-Process treats them as a
+# duplicate dictionary key, so normalize the process environment first.
+$ProcessPathValue = $env:Path
+[System.Environment]::SetEnvironmentVariable("PATH", $null, [System.EnvironmentVariableTarget]::Process)
+[System.Environment]::SetEnvironmentVariable("Path", $ProcessPathValue, [System.EnvironmentVariableTarget]::Process)
 
 $Process = Start-Process `
     -WindowStyle Hidden `

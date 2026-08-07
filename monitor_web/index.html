@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#08120f">
+    <title>Zhuorui Control Room</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Zhuorui Control Room home">
+          <span class="brand-mark" aria-hidden="true">ZR</span>
+          <span>
+            <strong>Zhuorui</strong>
+            <small>CONTROL ROOM</small>
+          </span>
+        </a>
+        <div class="topbar-status" aria-live="polite">
+          <span class="live-pulse" aria-hidden="true"></span>
+          <span>Secure monitor</span>
+          <span class="topbar-rule" aria-hidden="true"></span>
+          <span id="header-clock">--:--:--</span>
+          <button class="sign-out-button" id="sign-out" type="button">Sign out</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <div>
+            <p class="eyebrow">SYSTEM OVERVIEW</p>
+            <h1 id="page-title">Trading operations,<br><em>at a glance.</em></h1>
+            <p class="hero-copy">Monitor the listener and Android environment for this Zhuorui account. Status is checked on the server every 60 seconds.</p>
+          </div>
+          <div class="account-plate" aria-label="Current Zhuorui account">
+            <p>ACTIVE ACCOUNT</p>
+            <strong id="account-id">Loading…</strong>
+            <span id="server-id">—</span>
+          </div>
+        </section>
+
+        <section class="control-grid" aria-label="System controls">
+          <article class="system-card" id="script-card">
+            <div class="card-heading">
+              <div>
+                <span class="card-number">01</span>
+                <p class="card-kicker">TRADING SERVICE</p>
+                <h2>Zhuorui Listener</h2>
+              </div>
+              <div class="status-pill is-loading" id="script-status">
+                <span aria-hidden="true"></span>
+                <strong>Checking</strong>
+              </div>
+            </div>
+
+            <dl class="metrics">
+              <div>
+                <dt>Process ID</dt>
+                <dd id="script-pid">—</dd>
+              </div>
+              <div>
+                <dt>Started</dt>
+                <dd id="script-started">—</dd>
+              </div>
+              <div class="metric-wide">
+                <dt>Run duration</dt>
+                <dd id="script-duration">—</dd>
+              </div>
+            </dl>
+
+            <p class="status-note" id="script-message">Waiting for the first status check.</p>
+            <div class="card-actions">
+              <button class="action-button primary" id="script-start" type="button" data-action="script/start" disabled>
+                <span aria-hidden="true">▶</span> Start listener
+              </button>
+              <button class="action-button secondary danger" id="script-stop" type="button" data-action="script/stop" data-confirm="Stop the Zhuorui trading listener? New commands will not be processed until it is started again." disabled>
+                <span aria-hidden="true">■</span> Stop listener
+              </button>
+            </div>
+          </article>
+
+          <article class="system-card" id="emulator-card">
+            <div class="card-heading">
+              <div>
+                <span class="card-number">02</span>
+                <p class="card-kicker">ANDROID ENVIRONMENT</p>
+                <h2>Trading Emulator</h2>
+              </div>
+              <div class="status-pill is-loading" id="emulator-status">
+                <span aria-hidden="true"></span>
+                <strong>Checking</strong>
+              </div>
+            </div>
+
+            <dl class="metrics">
+              <div>
+                <dt>Virtual device</dt>
+                <dd id="emulator-avd">—</dd>
+              </div>
+              <div>
+                <dt>ADB device</dt>
+                <dd id="emulator-device">—</dd>
+              </div>
+              <div class="metric-wide">
+                <dt>Availability</dt>
+                <dd id="emulator-availability">—</dd>
+              </div>
+            </dl>
+
+            <p class="status-note" id="emulator-message">Waiting for the first status check.</p>
+            <div class="card-actions">
+              <button class="action-button primary" id="emulator-start" type="button" data-action="emulator/start" disabled>
+                <span aria-hidden="true">▶</span> Start emulator
+              </button>
+              <button class="action-button secondary danger" id="emulator-stop" type="button" data-action="emulator/stop" data-confirm="Stop the Android emulator? The trading listener may lose access to the Zhuorui app." disabled>
+                <span aria-hidden="true">■</span> Stop emulator
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <section class="monitor-strip" aria-label="Monitor timing">
+          <div class="monitor-intro">
+            <span class="monitor-symbol" aria-hidden="true">⌁</span>
+            <div>
+              <p>AUTOMATIC HEALTH CHECK</p>
+              <strong>Monitoring is active</strong>
+            </div>
+          </div>
+          <div class="check-data">
+            <div>
+              <span>Last checked</span>
+              <strong id="last-checked">—</strong>
+            </div>
+            <div>
+              <span>Next check</span>
+              <strong id="next-check">—</strong>
+            </div>
+            <button class="refresh-button" id="refresh-status" type="button" disabled>
+              <span aria-hidden="true">↻</span> Check now
+            </button>
+          </div>
+        </section>
+
+        <p class="security-note"><span aria-hidden="true">●</span> Authenticated HTTPS session. Trading account credentials are never shown.</p>
+      </main>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

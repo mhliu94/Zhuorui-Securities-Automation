@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#08120f">
+    <title>Sign in · Zhuorui Control Room</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/login.js" defer></script>
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="login-intro" aria-labelledby="login-title">
+        <a class="brand login-brand" href="/login" aria-label="Zhuorui Control Room sign in">
+          <span class="brand-mark" aria-hidden="true">ZR</span>
+          <span>
+            <strong>Zhuorui</strong>
+            <small>CONTROL ROOM</small>
+          </span>
+        </a>
+        <div>
+          <p class="eyebrow">SECURE ACCESS</p>
+          <h1 id="login-title">Your trading operations,<br><em>under lock.</em></h1>
+          <p>Sign in to view system status or control the Zhuorui listener and Android emulator.</p>
+        </div>
+        <p class="login-footnote"><span aria-hidden="true">●</span> Encrypted HTTPS connection</p>
+      </section>
+
+      <section class="login-panel" aria-labelledby="form-title">
+        <div class="login-panel-head">
+          <span class="login-lock" aria-hidden="true">⌾</span>
+          <div>
+            <p>ADMINISTRATOR</p>
+            <h2 id="form-title">Sign in to continue</h2>
+          </div>
+        </div>
+        <form id="login-form" autocomplete="on">
+          <label for="username">Username</label>
+          <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="128">
+
+          <label for="password">Password</label>
+          <div class="password-field">
+            <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+            <button id="toggle-password" type="button" aria-label="Show password">Show</button>
+          </div>
+
+          <p class="login-error" id="login-error" role="alert" hidden></p>
+          <button class="login-submit" id="login-submit" type="submit">
+            Sign in <span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="login-notice">Access is restricted to the authorized server administrator. Failed attempts are rate-limited and temporarily locked.</p>
+      </section>
+    </main>
+  </body>
+</html>
