@@ -42,6 +42,8 @@ SESSION_LIFETIME_SECONDS = 8 * 60 * 60
 LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
 MAX_LOGIN_FAILURES = 5
+HOLDINGS_QUERY_PATTERN = re.compile(r"Holdings query completed in ([0-9]+(?:\.[0-9]+)?) seconds\.")
+HOLDINGS_QUERY_SAMPLE_SIZE = 10
 HEALTH_LEVEL_RANK = {"healthy": 0, "under_load": 1, "restart_recommended": 2}
 HEALTH_LEVEL_LABEL = {
     "healthy": "Healthy",
@@ -467,6 +469,69 @@ class ZhuoruiController:
             "message": "The trading listener is healthy and running.",
         }
 
+    def holdings_query_performance(self, script: Mapping[str, Any]) -> dict[str, Any]:
+        unavailable = {
+            "available": False,
+            "session_started_at": script.get("started_at"),
+            "attempts_in_session": 0,
+            "sample_count": 0,
+            "sample_size": HOLDINGS_QUERY_SAMPLE_SIZE,
+            "average_seconds": None,
+            "fastest_seconds": None,
+            "slowest_seconds": None,
+        }
+        if not script.get("running"):
+            return {**unavailable, "message": "No active listener session."}
+
+        metadata = read_json(self.run_path)
+        if metadata.get("pid") not in (script.get("pid"), str(script.get("pid"))):
+            return {**unavailable, "message": "The active listener log could not be verified."}
+        raw_log_path = metadata.get("stdout")
+        if not isinstance(raw_log_path, str) or not raw_log_path.strip():
+            return {**unavailable, "message": "The active listener log is not configured."}
+
+        log_path = Path(raw_log_path)
+        if not log_path.is_absolute():
+            log_path = self.root / log_path
+        try:
+            resolved_log = log_path.resolve()
+            resolved_log.relative_to((self.root / "logs").resolve())
+            content = resolved_log.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return {**unavailable, "message": "The active listener log is not available yet."}
+
+        durations = [float(match.group(1)) for match in HOLDINGS_QUERY_PATTERN.finditer(content)]
+        samples = durations[-HOLDINGS_QUERY_SAMPLE_SIZE:]
+        if not samples:
+            return {
+                **unavailable,
+                "message": "No completed holdings queries in this listener session yet.",
+            }
+
+        sample_count = len(samples)
+        attempts_in_session = len(durations)
+        if attempts_in_session > HOLDINGS_QUERY_SAMPLE_SIZE:
+            message = (
+                f"Using the latest {sample_count} of {attempts_in_session} completed queries "
+                "from this listener session."
+            )
+        else:
+            message = (
+                f"Using all {sample_count} completed quer{'y' if sample_count == 1 else 'ies'} "
+                "available in this listener session."
+            )
+        return {
+            "available": True,
+            "session_started_at": script.get("started_at"),
+            "attempts_in_session": attempts_in_session,
+            "sample_count": sample_count,
+            "sample_size": HOLDINGS_QUERY_SAMPLE_SIZE,
+            "average_seconds": round(sum(samples) / sample_count, 3),
+            "fastest_seconds": round(min(samples), 3),
+            "slowest_seconds": round(max(samples), 3),
+            "message": message,
+        }
+
     def _adb_path(self, config: Mapping[str, Any]) -> Path | None:
         configured = config.get("adb")
         candidates: list[Path] = []
@@ -849,10 +914,12 @@ class ZhuoruiController:
 
     def collect_status(self, interval_seconds: int = DEFAULT_INTERVAL_SECONDS) -> dict[str, Any]:
         checked_at = utc_now()
+        script = self.script_status(checked_at)
         emulator = self.emulator_status(checked_at)
         return {
             "account": self.public_config(),
-            "script": self.script_status(checked_at),
+            "script": script,
+            "holdings_queries": self.holdings_query_performance(script),
             "emulator": emulator,
             "health": self.health_status(emulator, checked_at),
             "checked_at": iso_utc(checked_at),

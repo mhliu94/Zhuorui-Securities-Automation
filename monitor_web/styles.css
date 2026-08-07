@@ -474,6 +474,89 @@ main {
   color: var(--red);
 }
 
+.query-panel {
+  display: grid;
+  grid-template-columns: minmax(290px, 1.2fr) minmax(480px, 1fr);
+  gap: 30px;
+  margin-top: 20px;
+  padding: 27px 30px;
+  border: 1px solid var(--line);
+  background: rgba(13, 25, 21, 0.62);
+  box-shadow: var(--shadow);
+}
+
+.query-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.query-kicker {
+  margin: 0;
+  color: var(--green);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+
+.query-heading h2 {
+  margin: 8px 0 0;
+  font: 400 26px/1.12 Georgia, "Times New Roman", serif;
+  letter-spacing: -0.025em;
+}
+
+.query-heading > div > p:last-child {
+  max-width: 470px;
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.query-count {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 100px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.query-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.query-stats div {
+  min-width: 0;
+  padding: 17px 18px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.query-stats dt {
+  color: var(--faint);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.query-stats dd {
+  margin: 12px 0 0;
+  color: var(--cream);
+  font: 500 20px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
+}
+
 .health-panel {
   margin-top: 20px;
   padding: 28px 30px 30px;
@@ -961,6 +1044,10 @@ main {
     grid-template-columns: 1fr;
   }
 
+  .query-panel {
+    grid-template-columns: 1fr;
+  }
+
   .health-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1045,6 +1132,18 @@ main {
   }
 
   .card-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .query-panel {
+    padding: 24px 20px 22px;
+  }
+
+  .query-heading {
+    flex-direction: column;
+  }
+
+  .query-stats {
     grid-template-columns: 1fr;
   }
 

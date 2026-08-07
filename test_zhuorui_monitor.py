@@ -148,6 +148,68 @@ class ZhuoruiControllerTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("start_zhuorui_listener.ps1", control_runner.calls[0][-1])
 
+    def test_holdings_performance_uses_only_last_ten_from_current_session(self):
+        logs = self.root / "logs"
+        logs.mkdir()
+        previous_log = logs / "previous.out.log"
+        previous_log.write_text("Holdings query completed in 999.000 seconds.\n", encoding="utf-8")
+        current_log = logs / "current.out.log"
+        current_log.write_text(
+            "\n".join(f"Holdings query completed in {value:.3f} seconds." for value in range(1, 13)),
+            encoding="utf-8",
+        )
+        self.write_json(
+            "zhuorui_listener.current.json",
+            {"pid": 4321, "stdout": str(current_log)},
+        )
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+
+        performance = controller.holdings_query_performance(
+            {"running": True, "pid": 4321, "started_at": "2026-08-07T18:00:00Z"}
+        )
+
+        self.assertTrue(performance["available"])
+        self.assertEqual(performance["attempts_in_session"], 12)
+        self.assertEqual(performance["sample_count"], 10)
+        self.assertEqual(performance["average_seconds"], 7.5)
+        self.assertEqual(performance["fastest_seconds"], 3.0)
+        self.assertEqual(performance["slowest_seconds"], 12.0)
+
+    def test_holdings_performance_averages_all_available_when_under_ten(self):
+        logs = self.root / "logs"
+        logs.mkdir()
+        current_log = logs / "current.out.log"
+        current_log.write_text(
+            "Holdings query completed in 2.000 seconds.\n"
+            "Holdings query completed in 4.000 seconds.\n"
+            "Holdings query completed in 6.000 seconds.\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "zhuorui_listener.current.json",
+            {"pid": 4321, "stdout": str(current_log)},
+        )
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+
+        performance = controller.holdings_query_performance(
+            {"running": True, "pid": 4321, "started_at": "2026-08-07T18:00:00Z"}
+        )
+
+        self.assertEqual(performance["sample_count"], 3)
+        self.assertEqual(performance["average_seconds"], 4.0)
+        self.assertEqual(performance["fastest_seconds"], 2.0)
+        self.assertEqual(performance["slowest_seconds"], 6.0)
+
+    def test_holdings_performance_does_not_reuse_stopped_session(self):
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+
+        performance = controller.holdings_query_performance(
+            {"running": False, "pid": None, "started_at": None}
+        )
+
+        self.assertFalse(performance["available"])
+        self.assertEqual(performance["sample_count"], 0)
+
     def test_health_status_reports_all_five_healthy_metrics(self):
         controller = ZhuoruiController(
             self.root,

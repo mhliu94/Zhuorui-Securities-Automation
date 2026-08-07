@@ -14,6 +14,8 @@ const elements = Object.fromEntries(
     "script-started", "script-duration", "script-message", "script-start", "script-stop",
     "emulator-card", "emulator-status", "emulator-avd", "emulator-device",
     "emulator-availability", "emulator-message", "emulator-start", "emulator-stop",
+    "holdings-query-message", "holdings-query-count", "holdings-query-average",
+    "holdings-query-fastest", "holdings-query-slowest",
     "health-overall", "health-summary", "health-machine-cpu-value", "health-machine-cpu-detail",
     "health-machine-cpu-level", "health-machine-memory-value", "health-machine-memory-detail",
     "health-machine-memory-level", "health-emulator-memory-value", "health-emulator-memory-detail",
@@ -110,6 +112,20 @@ function renderHealth(health) {
   });
 }
 
+function querySeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? `${seconds.toFixed(3)} s` : "—";
+}
+
+function renderHoldingsQueries(performance) {
+  const count = Number(performance.sample_count) || 0;
+  elements["holdings-query-count"].textContent = `${count} attempt${count === 1 ? "" : "s"}`;
+  elements["holdings-query-message"].textContent = performance.message || "Query timing is unavailable.";
+  elements["holdings-query-average"].textContent = querySeconds(performance.average_seconds);
+  elements["holdings-query-fastest"].textContent = querySeconds(performance.fastest_seconds);
+  elements["holdings-query-slowest"].textContent = querySeconds(performance.slowest_seconds);
+}
+
 function setButtonState() {
   const scriptRunning = Boolean(state.status?.script?.running);
   const emulatorRunning = Boolean(state.status?.emulator?.running);
@@ -143,6 +159,11 @@ function renderStatus(payload) {
   elements["emulator-device"].textContent = emulator.device || "Not configured";
   elements["emulator-availability"].textContent = statusLabel(emulator.state);
   elements["emulator-message"].textContent = emulator.message || "Emulator status unavailable.";
+
+  renderHoldingsQueries(payload.holdings_queries || {
+    sample_count: 0,
+    message: "Query timing is unavailable.",
+  });
 
   renderHealth(payload.health || {
     overall_level: "under_load",
