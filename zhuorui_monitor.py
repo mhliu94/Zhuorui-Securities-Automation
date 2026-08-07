@@ -14,8 +14,10 @@ import signal
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -40,6 +42,12 @@ SESSION_LIFETIME_SECONDS = 8 * 60 * 60
 LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
 MAX_LOGIN_FAILURES = 5
+HEALTH_LEVEL_RANK = {"healthy": 0, "under_load": 1, "restart_recommended": 2}
+HEALTH_LEVEL_LABEL = {
+    "healthy": "Healthy",
+    "under_load": "Under load",
+    "restart_recommended": "Restart recommended",
+}
 
 
 def utc_now() -> datetime:
@@ -136,6 +144,150 @@ def process_probe(pid: int) -> dict[str, Any]:
         kernel32.CloseHandle(handle)
 
 
+def sample_machine_resources(sample_seconds: float = 0.15) -> dict[str, float | int | None]:
+    """Sample Windows CPU and physical memory without an external dependency."""
+    if os.name != "nt":
+        return {
+            "cpu_percent": None,
+            "memory_percent": None,
+            "memory_total_bytes": None,
+            "memory_available_bytes": None,
+        }
+
+    from ctypes import wintypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("memory_load", wintypes.DWORD),
+            ("total_physical", ctypes.c_ulonglong),
+            ("available_physical", ctypes.c_ulonglong),
+            ("total_page_file", ctypes.c_ulonglong),
+            ("available_page_file", ctypes.c_ulonglong),
+            ("total_virtual", ctypes.c_ulonglong),
+            ("available_virtual", ctypes.c_ulonglong),
+            ("available_extended_virtual", ctypes.c_ulonglong),
+        ]
+
+    def filetime_value(value: FileTime) -> int:
+        return (value.high << 32) | value.low
+
+    def system_times(kernel32: Any) -> tuple[int, int, int] | None:
+        idle = FileTime()
+        kernel = FileTime()
+        user = FileTime()
+        if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return filetime_value(idle), filetime_value(kernel), filetime_value(user)
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetSystemTimes.argtypes = [
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        ]
+        kernel32.GetSystemTimes.restype = wintypes.BOOL
+        kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatusEx)]
+        kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+
+        before = system_times(kernel32)
+        time.sleep(max(0.05, sample_seconds))
+        after = system_times(kernel32)
+        cpu_percent: float | None = None
+        if before and after:
+            idle_delta = after[0] - before[0]
+            total_delta = (after[1] - before[1]) + (after[2] - before[2])
+            if total_delta > 0:
+                cpu_percent = round(max(0.0, min(100.0, (total_delta - idle_delta) * 100 / total_delta)), 1)
+
+        memory = MemoryStatusEx()
+        memory.length = ctypes.sizeof(MemoryStatusEx)
+        if not kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+            raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx failed")
+        return {
+            "cpu_percent": cpu_percent,
+            "memory_percent": float(memory.memory_load),
+            "memory_total_bytes": int(memory.total_physical),
+            "memory_available_bytes": int(memory.available_physical),
+        }
+    except (OSError, AttributeError, TypeError, ValueError):
+        return {
+            "cpu_percent": None,
+            "memory_percent": None,
+            "memory_total_bytes": None,
+            "memory_available_bytes": None,
+        }
+
+
+def format_bytes(value: int | float | None) -> str:
+    if not isinstance(value, (int, float)):
+        return "Unavailable"
+    amount = max(0.0, float(value))
+    if amount >= 1024**3:
+        return f"{amount / 1024**3:.1f} GB"
+    return f"{amount / 1024**2:.0f} MB"
+
+
+def parse_android_memory_summary(output: str) -> dict[str, Any]:
+    """Parse the stable summary lines emitted by Android's dumpsys meminfo."""
+    values: dict[str, Any] = {}
+    patterns = {
+        "total_bytes": r"(?m)^\s*Total RAM:\s*([\d,]+)K",
+        "free_reclaimable_bytes": r"(?m)^\s*Free RAM:\s*([\d,]+)K",
+        "used_bytes": r"(?m)^\s*Used RAM:\s*([\d,]+)K",
+        "lost_bytes": r"(?m)^\s*Lost RAM:\s*([\d,]+)K",
+    }
+    for name, pattern in patterns.items():
+        match = re.search(pattern, output)
+        if match:
+            values[name] = int(match.group(1).replace(",", "")) * 1024
+
+    status_match = re.search(r"(?m)^\s*Total RAM:.*?\(status\s+([^)]+)\)", output, re.IGNORECASE)
+    values["status"] = status_match.group(1).strip().lower() if status_match else None
+
+    zram_match = re.search(
+        r"(?m)^\s*ZRAM:\s*([\d,]+)K physical used for\s*([\d,]+)K in swap\s*"
+        r"\(([\d,]+)K total swap\)",
+        output,
+        re.IGNORECASE,
+    )
+    if zram_match:
+        values["zram_physical_bytes"] = int(zram_match.group(1).replace(",", "")) * 1024
+        values["swap_used_bytes"] = int(zram_match.group(2).replace(",", "")) * 1024
+        values["swap_total_bytes"] = int(zram_match.group(3).replace(",", "")) * 1024
+    return values
+
+
+def parse_android_app_meminfo(output: str) -> dict[str, int]:
+    match = re.search(
+        r"TOTAL PSS:\s*([\d,]+)\s+TOTAL RSS:\s*([\d,]+)\s+TOTAL SWAP \(KB\):\s*([\d,]+)",
+        output,
+        re.IGNORECASE,
+    )
+    if not match:
+        return {}
+    return {
+        "app_pss_bytes": int(match.group(1).replace(",", "")) * 1024,
+        "app_rss_bytes": int(match.group(2).replace(",", "")) * 1024,
+        "app_swap_bytes": int(match.group(3).replace(",", "")) * 1024,
+    }
+
+
+def health_metric(metric_id: str, label: str, value: str, detail: str, level: str) -> dict[str, Any]:
+    return {
+        "id": metric_id,
+        "label": label,
+        "value": value,
+        "detail": detail,
+        "level": level,
+        "level_label": HEALTH_LEVEL_LABEL[level],
+    }
+
+
 def run_hidden(
     arguments: Sequence[str], *, cwd: Path, timeout: float
 ) -> subprocess.CompletedProcess[str]:
@@ -153,6 +305,29 @@ def run_hidden(
         check=False,
         **kwargs,
     )
+
+
+def run_control_command(
+    arguments: Sequence[str], *, cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run a control script without pipes that long-lived children can inherit."""
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    with tempfile.TemporaryFile() as output:
+        result = subprocess.run(
+            list(arguments),
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+            **kwargs,
+        )
+        output.seek(0)
+        message = output.read().decode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(list(arguments), result.returncode, message, "")
 
 
 def command_message(result: subprocess.CompletedProcess[str]) -> str:
@@ -192,15 +367,23 @@ class ZhuoruiController:
         *,
         probe: Callable[[int], dict[str, Any]] = process_probe,
         runner: Callable[..., subprocess.CompletedProcess[str]] = run_hidden,
+        control_runner: Callable[..., subprocess.CompletedProcess[str]] = run_control_command,
+        machine_sampler: Callable[[], dict[str, float | int | None]] = sample_machine_resources,
     ) -> None:
         self.root = root.resolve()
         self.probe = probe
         self.runner = runner
+        self.control_runner = control_runner
         self.pid_path = self.root / "zhuorui_listener.pid"
         self.run_path = self.root / "zhuorui_listener.current.json"
         self.emulator_run_path = self.root / "zhuorui_emulator.current.json"
         self.config_path = self.root / "zhuorui_config.json"
         self._action_lock = threading.Lock()
+        self.machine_sampler = machine_sampler
+        self._health_lock = threading.Lock()
+        self._cpu_history: deque[float] = deque(maxlen=5)
+        self._app_pss_history: deque[int] = deque(maxlen=5)
+        self._last_health_history_at = 0.0
 
     def public_config(self) -> dict[str, Any]:
         config = read_json(self.config_path)
@@ -355,6 +538,9 @@ class ZhuoruiController:
             "pid": tracked_pid,
             "started_at": iso_utc(tracked_start) if tracked_start else None,
             "duration_seconds": max(0, int((now - tracked_start).total_seconds())) if tracked_start else None,
+            "adb_state": "unavailable",
+            "adb_latency_ms": None,
+            "shell_latency_ms": None,
         }
 
         if not adb_path:
@@ -366,17 +552,24 @@ class ZhuoruiController:
             }
 
         try:
+            adb_started = time.perf_counter()
             result = self.runner([str(adb_path), "devices"], cwd=self.root, timeout=8)
+            adb_latency_ms = round((time.perf_counter() - adb_started) * 1000)
         except (OSError, subprocess.SubprocessError) as exc:
+            adb_latency_ms = round((time.perf_counter() - adb_started) * 1000)
             if tracked:
                 return {
                     **base,
+                    "adb_state": "error",
+                    "adb_latency_ms": adb_latency_ms,
                     "state": "starting",
                     "running": True,
                     "message": "The emulator process is running; ADB is not ready yet.",
                 }
             return {
                 **base,
+                "adb_state": "error",
+                "adb_latency_ms": adb_latency_ms,
                 "state": "unavailable",
                 "running": False,
                 "message": f"ADB status check failed: {exc}",
@@ -385,6 +578,8 @@ class ZhuoruiController:
         if result.returncode != 0:
             return {
                 **base,
+                "adb_state": "error",
+                "adb_latency_ms": adb_latency_ms,
                 "state": "starting" if tracked else "unavailable",
                 "running": tracked,
                 "message": "The emulator is starting." if tracked else "ADB could not check the emulator.",
@@ -393,17 +588,24 @@ class ZhuoruiController:
         device_state = self._parse_adb_devices(result.stdout).get(public["device"])
         if device_state == "device":
             boot_complete = False
+            shell_latency_ms: int | None = None
             try:
+                shell_started = time.perf_counter()
                 boot_result = self.runner(
                     [str(adb_path), "-s", public["device"], "shell", "getprop", "sys.boot_completed"],
                     cwd=self.root,
                     timeout=5,
                 )
+                shell_latency_ms = round((time.perf_counter() - shell_started) * 1000)
                 boot_complete = boot_result.returncode == 0 and boot_result.stdout.strip() == "1"
             except (OSError, subprocess.SubprocessError):
+                shell_latency_ms = round((time.perf_counter() - shell_started) * 1000)
                 boot_complete = False
             return {
                 **base,
+                "adb_state": "device",
+                "adb_latency_ms": adb_latency_ms,
+                "shell_latency_ms": shell_latency_ms,
                 "state": "running" if boot_complete else "booting",
                 "running": True,
                 "message": "The Android emulator is ready." if boot_complete else "Android is finishing its boot sequence.",
@@ -411,6 +613,8 @@ class ZhuoruiController:
         if device_state in {"offline", "unauthorized"}:
             return {
                 **base,
+                "adb_state": device_state,
+                "adb_latency_ms": adb_latency_ms,
                 "state": "booting" if device_state == "offline" else "attention",
                 "running": True,
                 "message": f"ADB reports the emulator as {device_state}.",
@@ -418,23 +622,239 @@ class ZhuoruiController:
         if tracked:
             return {
                 **base,
+                "adb_state": "disconnected",
+                "adb_latency_ms": adb_latency_ms,
                 "state": "starting",
                 "running": True,
                 "message": "The emulator process is starting; waiting for ADB.",
             }
         return {
             **base,
+            "adb_state": "disconnected",
+            "adb_latency_ms": adb_latency_ms,
             "state": "stopped",
             "running": False,
             "message": "The Android emulator is not running.",
         }
 
+    def _android_memory_status(self, emulator: Mapping[str, Any]) -> dict[str, Any] | None:
+        if emulator.get("adb_state") != "device":
+            return None
+        config = self._config()
+        adb_path = self._adb_path(config)
+        device = str(emulator.get("device") or self.public_config()["device"])
+        if not adb_path or not device:
+            return None
+
+        try:
+            system_result = self.runner(
+                [str(adb_path), "-s", device, "shell", "dumpsys", "meminfo"],
+                cwd=self.root,
+                timeout=20,
+            )
+            if system_result.returncode != 0:
+                return None
+            memory = parse_android_memory_summary(system_result.stdout)
+            if not isinstance(memory.get("total_bytes"), int) or not isinstance(memory.get("used_bytes"), int):
+                return None
+
+            package_name = str(config.get("android_package") or "com.zhuorui.securities")
+            app_result = self.runner(
+                [str(adb_path), "-s", device, "shell", "dumpsys", "meminfo", package_name],
+                cwd=self.root,
+                timeout=15,
+            )
+            if app_result.returncode == 0:
+                memory.update(parse_android_app_meminfo(app_result.stdout))
+            memory["package"] = package_name
+            return memory
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+            return None
+
+    def health_status(self, emulator: Mapping[str, Any], checked_at: datetime) -> dict[str, Any]:
+        try:
+            machine = self.machine_sampler()
+        except Exception:
+            machine = {}
+        cpu = machine.get("cpu_percent")
+        memory_percent = machine.get("memory_percent")
+        memory_total = machine.get("memory_total_bytes")
+        memory_available = machine.get("memory_available_bytes")
+        android_memory = self._android_memory_status(emulator)
+        app_pss = android_memory.get("app_pss_bytes") if android_memory else None
+
+        with self._health_lock:
+            sample_epoch = checked_at.timestamp()
+            if sample_epoch - self._last_health_history_at >= 30:
+                if isinstance(cpu, (int, float)):
+                    self._cpu_history.append(float(cpu))
+                if isinstance(app_pss, int):
+                    self._app_pss_history.append(app_pss)
+                self._last_health_history_at = sample_epoch
+            cpu_history = list(self._cpu_history)
+            app_pss_history = list(self._app_pss_history)
+
+        metrics: list[dict[str, Any]] = []
+
+        if isinstance(cpu, (int, float)):
+            cpu_average = sum(cpu_history) / len(cpu_history) if cpu_history else float(cpu)
+            if len(cpu_history) >= 3 and cpu_average >= 90:
+                cpu_level = "restart_recommended"
+            elif cpu >= 80 or (len(cpu_history) >= 3 and cpu_average >= 75):
+                cpu_level = "under_load"
+            else:
+                cpu_level = "healthy"
+            cpu_detail = f"{len(cpu_history)}-check average: {cpu_average:.0f}%."
+            cpu_value = f"{cpu:.0f}%"
+        else:
+            cpu_level = "under_load"
+            cpu_detail = "Windows CPU counters are unavailable."
+            cpu_value = "Unavailable"
+        metrics.append(health_metric("machine_cpu", "Machine CPU", cpu_value, cpu_detail, cpu_level))
+
+        if isinstance(memory_percent, (int, float)) and isinstance(memory_total, int) and isinstance(memory_available, int):
+            if memory_percent >= 93 or memory_available < 0.75 * 1024**3:
+                memory_level = "restart_recommended"
+            elif memory_percent >= 85 or memory_available < 1.5 * 1024**3:
+                memory_level = "under_load"
+            else:
+                memory_level = "healthy"
+            memory_used = max(0, memory_total - memory_available)
+            memory_value = f"{memory_percent:.0f}%"
+            memory_detail = f"{format_bytes(memory_used)} used · {format_bytes(memory_available)} available."
+        else:
+            memory_level = "under_load"
+            memory_value = "Unavailable"
+            memory_detail = "Windows memory counters are unavailable."
+        metrics.append(health_metric("machine_memory", "Machine memory", memory_value, memory_detail, memory_level))
+
+        emulator_running = bool(emulator.get("running"))
+        if android_memory:
+            guest_total = android_memory.get("total_bytes")
+            guest_used = android_memory.get("used_bytes")
+            guest_free = android_memory.get("free_reclaimable_bytes")
+            swap_used = android_memory.get("swap_used_bytes", 0)
+            swap_total = android_memory.get("swap_total_bytes", 0)
+            app_swap = android_memory.get("app_swap_bytes", 0)
+            guest_used_percent = (
+                guest_used * 100 / guest_total
+                if isinstance(guest_used, int) and isinstance(guest_total, int) and guest_total > 0
+                else None
+            )
+            swap_percent = (
+                swap_used * 100 / swap_total
+                if isinstance(swap_used, int) and isinstance(swap_total, int) and swap_total > 0
+                else 0.0
+            )
+            app_share = (
+                app_pss * 100 / guest_total
+                if isinstance(app_pss, int) and isinstance(guest_total, int) and guest_total > 0
+                else 0.0
+            )
+            app_growth = (
+                app_pss_history[-1] - app_pss_history[0]
+                if len(app_pss_history) >= 3
+                else 0
+            )
+            android_status = str(android_memory.get("status") or "").lower()
+
+            if (
+                not emulator_running
+                or "critical" in android_status
+                or (guest_used_percent is not None and guest_used_percent >= 90)
+                or swap_percent >= 70
+                or app_share >= 35
+                or (isinstance(app_swap, int) and app_swap >= 1024**3)
+                or app_growth >= 1024**3
+            ):
+                emulator_memory_level = "restart_recommended"
+            elif (
+                (android_status and android_status != "normal")
+                or (guest_used_percent is not None and guest_used_percent >= 75)
+                or swap_percent >= 30
+                or app_share >= 20
+                or (isinstance(app_swap, int) and app_swap >= 256 * 1024**2)
+                or app_growth >= 512 * 1024**2
+            ):
+                emulator_memory_level = "under_load"
+            else:
+                emulator_memory_level = "healthy"
+
+            emulator_memory_value = (
+                f"{guest_used_percent:.0f}% used" if guest_used_percent is not None else "Available"
+            )
+            detail_parts = []
+            if isinstance(guest_used, int):
+                detail_parts.append(f"{format_bytes(guest_used)} Android")
+            if isinstance(guest_free, int):
+                detail_parts.append(f"{format_bytes(guest_free)} free/reclaimable")
+            if isinstance(app_pss, int):
+                detail_parts.append(f"Zhuorui {format_bytes(app_pss)} PSS")
+            detail_parts.append(f"swap {swap_percent:.0f}%")
+            emulator_memory_detail = " · ".join(detail_parts) + "."
+        else:
+            emulator_memory_level = "under_load" if emulator_running else "restart_recommended"
+            emulator_memory_value = "Unavailable"
+            emulator_memory_detail = "Android memory pressure could not be read."
+        android_memory_metric = health_metric(
+            "emulator_memory",
+            "Android memory",
+            emulator_memory_value,
+            emulator_memory_detail,
+            emulator_memory_level,
+        )
+        android_memory_metric["stats"] = android_memory or {}
+        metrics.append(android_memory_metric)
+
+        adb_state = str(emulator.get("adb_state") or "unavailable")
+        adb_latency = emulator.get("adb_latency_ms")
+        if adb_state == "device" and isinstance(adb_latency, (int, float)):
+            adb_level = "under_load" if adb_latency >= 1000 else "healthy"
+            adb_value = f"Connected · {adb_latency:.0f} ms"
+            adb_detail = "ADB can see the configured emulator."
+        else:
+            adb_level = "restart_recommended"
+            adb_value = "Not connected"
+            adb_detail = f"ADB state: {adb_state.replace('_', ' ')}."
+        metrics.append(health_metric("adb_health", "ADB health", adb_value, adb_detail, adb_level))
+
+        shell_latency = emulator.get("shell_latency_ms")
+        if isinstance(shell_latency, (int, float)):
+            if shell_latency >= 3000:
+                shell_level = "restart_recommended"
+            elif shell_latency >= 1500 or emulator.get("state") != "running":
+                shell_level = "under_load"
+            else:
+                shell_level = "healthy"
+            shell_value = f"{shell_latency:.0f} ms"
+            shell_detail = "Android property query response time."
+        else:
+            shell_level = "restart_recommended"
+            shell_value = "No response"
+            shell_detail = "Android did not answer the health query."
+        metrics.append(health_metric("android_response", "Android response", shell_value, shell_detail, shell_level))
+
+        overall_level = max(metrics, key=lambda item: HEALTH_LEVEL_RANK[item["level"]])["level"]
+        summaries = {
+            "healthy": "All five health signals are within normal ranges.",
+            "under_load": "At least one signal is elevated. Watch the next 60-second checks.",
+            "restart_recommended": "At least one signal indicates that the emulator should be started or restarted.",
+        }
+        return {
+            "overall_level": overall_level,
+            "overall_label": HEALTH_LEVEL_LABEL[overall_level],
+            "summary": summaries[overall_level],
+            "metrics": metrics,
+        }
+
     def collect_status(self, interval_seconds: int = DEFAULT_INTERVAL_SECONDS) -> dict[str, Any]:
         checked_at = utc_now()
+        emulator = self.emulator_status(checked_at)
         return {
             "account": self.public_config(),
             "script": self.script_status(checked_at),
-            "emulator": self.emulator_status(checked_at),
+            "emulator": emulator,
+            "health": self.health_status(emulator, checked_at),
             "checked_at": iso_utc(checked_at),
             "next_check_at": iso_utc(checked_at + timedelta(seconds=interval_seconds)),
             "interval_seconds": interval_seconds,
@@ -455,7 +875,7 @@ class ZhuoruiController:
             str(script_path),
         ]
         try:
-            result = self.runner(arguments, cwd=self.root, timeout=timeout)
+            result = self.control_runner(arguments, cwd=self.root, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             return ActionResult(False, f"Control action failed: {exc}")
         return ActionResult(result.returncode == 0, command_message(result))

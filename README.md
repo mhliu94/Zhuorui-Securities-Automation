@@ -20,6 +20,7 @@ It shows:
 - whether the Zhuorui listener is running;
 - its PID, start time, and live run duration;
 - the configured Android virtual device and ADB connection state;
+- five emulator-stress signals with a Healthy, Under load, or Restart recommended level: machine CPU, machine memory, Android memory pressure, ADB health, and Android response time;
 - controls to start or stop the listener and emulator.
 
 Use **Check now** for an immediate status refresh. Stop the dashboard itself with:

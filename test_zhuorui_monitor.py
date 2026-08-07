@@ -12,6 +12,8 @@ from zhuorui_monitor import (
     RedirectServer,
     ZhuoruiController,
     ZhuoruiServer,
+    parse_android_app_meminfo,
+    parse_android_memory_summary,
     parse_datetime,
     verify_admin_credentials,
 )
@@ -134,13 +136,153 @@ class ZhuoruiControllerTests(unittest.TestCase):
 
     def test_start_listener_uses_existing_powershell_control(self):
         (self.root / "start_zhuorui_listener.ps1").write_text("", encoding="utf-8")
-        runner = FakeRunner()
-        controller = ZhuoruiController(self.root, runner=runner)
+        control_runner = FakeRunner()
+        controller = ZhuoruiController(
+            self.root,
+            runner=FakeRunner(),
+            control_runner=control_runner,
+        )
 
         result = controller.start_script()
 
         self.assertTrue(result.ok)
-        self.assertIn("start_zhuorui_listener.ps1", runner.calls[0][-1])
+        self.assertIn("start_zhuorui_listener.ps1", control_runner.calls[0][-1])
+
+    def test_health_status_reports_all_five_healthy_metrics(self):
+        controller = ZhuoruiController(
+            self.root,
+            runner=FakeRunner(),
+            machine_sampler=lambda: {
+                "cpu_percent": 24.0,
+                "memory_percent": 48.0,
+                "memory_total_bytes": 16 * 1024**3,
+                "memory_available_bytes": 8 * 1024**3,
+            },
+        )
+        controller._android_memory_status = lambda emulator: {
+            "total_bytes": 12 * 1024**3,
+            "used_bytes": int(2.5 * 1024**3),
+            "free_reclaimable_bytes": int(9.5 * 1024**3),
+            "status": "normal",
+            "swap_used_bytes": 500 * 1024**2,
+            "swap_total_bytes": 9 * 1024**3,
+            "app_pss_bytes": 300 * 1024**2,
+            "app_rss_bytes": 500 * 1024**2,
+            "app_swap_bytes": 0,
+        }
+
+        health = controller.health_status(
+            {
+                "running": True,
+                "state": "running",
+                "adb_state": "device",
+                "adb_latency_ms": 80,
+                "shell_latency_ms": 120,
+            },
+            datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(health["overall_level"], "healthy")
+        self.assertEqual(
+            [metric["id"] for metric in health["metrics"]],
+            ["machine_cpu", "machine_memory", "emulator_memory", "adb_health", "android_response"],
+        )
+        self.assertTrue(all(metric["level_label"] == "Healthy" for metric in health["metrics"]))
+
+    def test_health_status_recommends_restart_for_critical_memory_pressure(self):
+        controller = ZhuoruiController(
+            self.root,
+            runner=FakeRunner(),
+            machine_sampler=lambda: {
+                "cpu_percent": 35.0,
+                "memory_percent": 95.0,
+                "memory_total_bytes": 8 * 1024**3,
+                "memory_available_bytes": 400 * 1024**2,
+            },
+        )
+        controller._android_memory_status = lambda emulator: {
+            "total_bytes": 12 * 1024**3,
+            "used_bytes": int(2.5 * 1024**3),
+            "free_reclaimable_bytes": int(9.5 * 1024**3),
+            "status": "normal",
+            "swap_used_bytes": 500 * 1024**2,
+            "swap_total_bytes": 9 * 1024**3,
+            "app_pss_bytes": 300 * 1024**2,
+            "app_rss_bytes": 500 * 1024**2,
+            "app_swap_bytes": 0,
+        }
+
+        health = controller.health_status(
+            {
+                "running": True,
+                "state": "running",
+                "adb_state": "device",
+                "adb_latency_ms": 90,
+                "shell_latency_ms": 140,
+            },
+            datetime.now(timezone.utc),
+        )
+
+        memory_metric = next(metric for metric in health["metrics"] if metric["id"] == "machine_memory")
+        self.assertEqual(memory_metric["level"], "restart_recommended")
+        self.assertEqual(health["overall_label"], "Restart recommended")
+
+    def test_android_memory_parsers_use_guest_and_app_values(self):
+        system = parse_android_memory_summary(
+            """
+            Total RAM: 12,246,832K (status normal)
+             Free RAM: 10,041,759K (cached and free)
+             Used RAM: 2,490,360K (pss and kernel)
+             Lost RAM: 183,789K
+                 ZRAM: 218,068K physical used for 506,312K in swap (9,185,120K total swap)
+            """
+        )
+        app = parse_android_app_meminfo(
+            "TOTAL PSS: 297820 TOTAL RSS: 507044 TOTAL SWAP (KB): 0"
+        )
+
+        self.assertEqual(system["status"], "normal")
+        self.assertEqual(system["used_bytes"], 2_490_360 * 1024)
+        self.assertEqual(system["swap_used_bytes"], 506_312 * 1024)
+        self.assertEqual(app["app_pss_bytes"], 297_820 * 1024)
+        self.assertEqual(app["app_rss_bytes"], 507_044 * 1024)
+
+    def test_android_memory_pressure_drives_restart_level(self):
+        controller = ZhuoruiController(
+            self.root,
+            runner=FakeRunner(),
+            machine_sampler=lambda: {
+                "cpu_percent": 20.0,
+                "memory_percent": 50.0,
+                "memory_total_bytes": 32 * 1024**3,
+                "memory_available_bytes": 16 * 1024**3,
+            },
+        )
+        controller._android_memory_status = lambda emulator: {
+            "total_bytes": 12 * 1024**3,
+            "used_bytes": 11 * 1024**3,
+            "free_reclaimable_bytes": 1 * 1024**3,
+            "status": "critical",
+            "swap_used_bytes": 7 * 1024**3,
+            "swap_total_bytes": 9 * 1024**3,
+            "app_pss_bytes": 2 * 1024**3,
+            "app_swap_bytes": 512 * 1024**2,
+        }
+
+        health = controller.health_status(
+            {
+                "running": True,
+                "state": "running",
+                "adb_state": "device",
+                "adb_latency_ms": 80,
+                "shell_latency_ms": 120,
+            },
+            datetime.now(timezone.utc),
+        )
+
+        android_metric = next(metric for metric in health["metrics"] if metric["id"] == "emulator_memory")
+        self.assertEqual(android_metric["level"], "restart_recommended")
+        self.assertEqual(android_metric["value"], "92% used")
 
 
 class DummyController:

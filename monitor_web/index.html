@@ -122,6 +122,53 @@
           </article>
         </section>
 
+        <section class="health-panel" aria-labelledby="health-title">
+          <div class="health-heading">
+            <div>
+              <p class="health-kicker">EMULATOR STRESS</p>
+              <h2 id="health-title">Resource health</h2>
+              <p id="health-summary">Waiting for the first five-signal health check.</p>
+            </div>
+            <div class="health-level is-loading" id="health-overall" aria-live="polite">
+              <span aria-hidden="true"></span>
+              <strong>Checking</strong>
+            </div>
+          </div>
+
+          <div class="health-grid">
+            <article class="health-metric" data-health-metric="machine_cpu">
+              <p>Machine CPU</p>
+              <strong id="health-machine-cpu-value">—</strong>
+              <span id="health-machine-cpu-detail">Collecting Windows CPU usage.</span>
+              <div class="health-level is-loading" id="health-machine-cpu-level"><i aria-hidden="true"></i><b>Checking</b></div>
+            </article>
+            <article class="health-metric" data-health-metric="machine_memory">
+              <p>Machine memory</p>
+              <strong id="health-machine-memory-value">—</strong>
+              <span id="health-machine-memory-detail">Collecting physical memory usage.</span>
+              <div class="health-level is-loading" id="health-machine-memory-level"><i aria-hidden="true"></i><b>Checking</b></div>
+            </article>
+            <article class="health-metric" data-health-metric="emulator_memory">
+              <p>Android memory</p>
+              <strong id="health-emulator-memory-value">—</strong>
+              <span id="health-emulator-memory-detail">Reading Android memory pressure.</span>
+              <div class="health-level is-loading" id="health-emulator-memory-level"><i aria-hidden="true"></i><b>Checking</b></div>
+            </article>
+            <article class="health-metric" data-health-metric="adb_health">
+              <p>ADB health</p>
+              <strong id="health-adb-health-value">—</strong>
+              <span id="health-adb-health-detail">Checking the emulator connection.</span>
+              <div class="health-level is-loading" id="health-adb-health-level"><i aria-hidden="true"></i><b>Checking</b></div>
+            </article>
+            <article class="health-metric" data-health-metric="android_response">
+              <p>Android response</p>
+              <strong id="health-android-response-value">—</strong>
+              <span id="health-android-response-detail">Timing an Android shell query.</span>
+              <div class="health-level is-loading" id="health-android-response-level"><i aria-hidden="true"></i><b>Checking</b></div>
+            </article>
+          </div>
+        </section>
+
         <section class="monitor-strip" aria-label="Monitor timing">
           <div class="monitor-intro">
             <span class="monitor-symbol" aria-hidden="true">⌁</span>

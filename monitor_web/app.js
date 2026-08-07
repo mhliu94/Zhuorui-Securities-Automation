@@ -14,6 +14,12 @@ const elements = Object.fromEntries(
     "script-started", "script-duration", "script-message", "script-start", "script-stop",
     "emulator-card", "emulator-status", "emulator-avd", "emulator-device",
     "emulator-availability", "emulator-message", "emulator-start", "emulator-stop",
+    "health-overall", "health-summary", "health-machine-cpu-value", "health-machine-cpu-detail",
+    "health-machine-cpu-level", "health-machine-memory-value", "health-machine-memory-detail",
+    "health-machine-memory-level", "health-emulator-memory-value", "health-emulator-memory-detail",
+    "health-emulator-memory-level", "health-adb-health-value", "health-adb-health-detail",
+    "health-adb-health-level", "health-android-response-value", "health-android-response-detail",
+    "health-android-response-level",
     "last-checked", "next-check", "refresh-status", "header-clock", "toast-region", "sign-out",
   ].map((id) => [id, document.getElementById(id)])
 );
@@ -78,6 +84,32 @@ function paintStatus(target, status) {
   target.querySelector("strong").textContent = statusLabel(normalized);
 }
 
+function paintHealthLevel(target, level, label) {
+  const normalized = ["healthy", "under_load", "restart_recommended"].includes(level) ? level : "under_load";
+  target.className = `health-level is-${normalized.replaceAll("_", "-")}`;
+  const textTarget = target.querySelector("strong, b");
+  if (textTarget) textTarget.textContent = label || "Under load";
+}
+
+function renderHealth(health) {
+  const metricElements = {
+    machine_cpu: "machine-cpu",
+    machine_memory: "machine-memory",
+    emulator_memory: "emulator-memory",
+    adb_health: "adb-health",
+    android_response: "android-response",
+  };
+  paintHealthLevel(elements["health-overall"], health.overall_level, health.overall_label);
+  elements["health-summary"].textContent = health.summary || "Health information is unavailable.";
+  (health.metrics || []).forEach((metric) => {
+    const elementName = metricElements[metric.id];
+    if (!elementName) return;
+    elements[`health-${elementName}-value`].textContent = metric.value || "Unavailable";
+    elements[`health-${elementName}-detail`].textContent = metric.detail || "No detail available.";
+    paintHealthLevel(elements[`health-${elementName}-level`], metric.level, metric.level_label);
+  });
+}
+
 function setButtonState() {
   const scriptRunning = Boolean(state.status?.script?.running);
   const emulatorRunning = Boolean(state.status?.emulator?.running);
@@ -111,6 +143,13 @@ function renderStatus(payload) {
   elements["emulator-device"].textContent = emulator.device || "Not configured";
   elements["emulator-availability"].textContent = statusLabel(emulator.state);
   elements["emulator-message"].textContent = emulator.message || "Emulator status unavailable.";
+
+  renderHealth(payload.health || {
+    overall_level: "under_load",
+    overall_label: "Under load",
+    summary: "Health information is unavailable.",
+    metrics: [],
+  });
 
   elements["last-checked"].textContent = localDateTime(payload.checked_at);
   elements["next-check"].textContent = countdownText(payload.next_check_at);
