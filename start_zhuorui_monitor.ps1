@@ -2,7 +2,7 @@ param(
     [int]$Port = 443,
     [int]$RedirectHttpPort = 80,
     [string]$HostAddress = "0.0.0.0",
-    [string]$PublicHost = "209.250.240.250",
+    [string]$PublicHost,
     [ValidateRange(10, 86400)]
     [int]$Interval = 60,
     [string]$CertificatePath,
@@ -19,8 +19,39 @@ $CurrentRunPath = Join-Path $Root "zhuorui_monitor.current.json"
 $LogDir = Join-Path $Root "logs"
 $DefaultCertificatePath = Join-Path $Root "certs\zhuorui-monitor-cert.pem"
 $DefaultPrivateKeyPath = Join-Path $Root "certs\zhuorui-monitor-key.pem"
+$ConfigPath = Join-Path $Root "zhuorui_config.json"
 if (-not $CertificatePath) { $CertificatePath = $DefaultCertificatePath }
 if (-not $PrivateKeyPath) { $PrivateKeyPath = $DefaultPrivateKeyPath }
+if (-not $PublicHost) {
+    $ProbeSocket = $null
+    try {
+        $ProbeAddress = [System.Net.Dns]::GetHostAddresses("example.com") |
+            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+            Select-Object -First 1
+        if ($ProbeAddress) {
+            $ProbeSocket = New-Object System.Net.Sockets.Socket(
+                [System.Net.Sockets.AddressFamily]::InterNetwork,
+                [System.Net.Sockets.SocketType]::Dgram,
+                [System.Net.Sockets.ProtocolType]::Udp
+            )
+            $ProbeSocket.Connect($ProbeAddress, 443)
+            $PublicHost = $ProbeSocket.LocalEndPoint.Address.IPAddressToString
+        }
+    } catch {
+        $PublicHost = $null
+    } finally {
+        if ($ProbeSocket) { $ProbeSocket.Dispose() }
+    }
+}
+if (-not $PublicHost -and (Test-Path -LiteralPath $ConfigPath)) {
+    try {
+        $MonitorConfig = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+        $PublicHost = [string]$MonitorConfig.public_host
+    } catch {
+        $PublicHost = $null
+    }
+}
+if (-not $PublicHost) { $PublicHost = "localhost" }
 $UrlHost = if ($HostAddress -eq "0.0.0.0" -or $HostAddress -eq "::") { "localhost" } else { $HostAddress }
 $Url = if ($Port -eq 443) { "https://${UrlHost}/" } else { "https://${UrlHost}:$Port/" }
 

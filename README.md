@@ -46,7 +46,7 @@ The launcher binds to `0.0.0.0` by default. Open the Windows Firewall ports once
 .\enable_zhuorui_monitor_firewall.ps1
 ```
 
-Then enter `209.250.240.250` in another device's browser. Port 80 redirects it to `https://209.250.240.250/` on port 443. A router, cloud security group, or upstream network firewall may also need to allow TCP ports 80 and 443.
+The launcher detects the machine's active IPv4 address and uses it for the external URL and HTTP-to-HTTPS redirects. If automatic detection is unavailable, set `public_host` in `zhuorui_config.json`. A router, cloud security group, or upstream network firewall may also need to allow TCP ports 80 and 443.
 
 The included setup creates a self-signed certificate automatically. Browsers will show a certificate warning until the certificate is trusted on the client or replaced with a public certificate for a DNS name. To use a public certificate, pass its PEM files with `-CertificatePath` and `-PrivateKeyPath`.
 
@@ -60,13 +60,14 @@ Each remote client must also trust `certs\zhuorui-monitor-cert.cer`, otherwise i
 
 ## Configuration
 
-The dashboard reuses `zhuorui_config.json`. These fields control the emulator integration:
+The dashboard reuses `zhuorui_config.json`. These fields control the emulator integration and the optional public-host fallback:
 
 ```json
 {
   "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
-  "avd": "Pixel_10_2"
+  "avd": "Pixel_10_2",
+  "public_host": "dashboard.example.com"
 }
 ```
 
@@ -76,10 +77,10 @@ For normal operation, start the emulator first and wait for **Running**, then st
 
 ## Direct server options
 
-The PowerShell launcher accepts `-Port`, `-HostAddress`, `-Interval`, `-CertificatePath`, and `-PrivateKeyPath`. The Python server has matching options:
+The PowerShell launcher accepts `-Port`, `-HostAddress`, `-PublicHost`, `-Interval`, `-CertificatePath`, and `-PrivateKeyPath`. The Python server has matching options. Omit the public-host option to use automatic detection with the configuration fallback:
 
 ```powershell
-.\.venv\Scripts\python.exe .\zhuorui_monitor.py --host 0.0.0.0 --port 443 --redirect-http-port 80 --public-host 209.250.240.250 --interval 60 --cert-file .\certs\zhuorui-monitor-cert.pem --key-file .\certs\zhuorui-monitor-key.pem
+.\.venv\Scripts\python.exe .\zhuorui_monitor.py --host 0.0.0.0 --port 443 --redirect-http-port 80 --interval 60 --cert-file .\certs\zhuorui-monitor-cert.pem --key-file .\certs\zhuorui-monitor-key.pem
 ```
 
 No additional Python packages are required for the dashboard.
