@@ -24,3 +24,15 @@ certs/
 # Screenshot and debug artifacts
 *.png
 zr-*.xml
+
+# Android zero-idle helper build/debug artifacts
+android/build/
+android/out/
+android/classes/
+android/**/*.class
+android/classes.dex
+android/*-test.xml
+android/*-test.jar
+android/uiautomator-runtime.jar
+android/*.tmp
+# android/zhuorui-zero-idle-dump.jar is intentionally tracked for runtime use.

@@ -1,8 +1,10 @@
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from zhuorui_market_order import (
+    Adb,
     EMPTY_POSITIONS_LABEL,
     LOGIN_DELAY_SECONDS,
     Bounds,
@@ -196,6 +198,138 @@ class EmptyPositionsTests(unittest.TestCase):
         trader = ZhuoruiTrader(FakeAdb([node("No orders yet")]))
 
         self.assertFalse(trader.empty_positions_visible([node("No orders yet")]))
+
+
+class HoldingsDumpTimeoutTests(unittest.TestCase):
+    class RecordingAdb(FakeAdb):
+        def __init__(self, nodes: list[UiNode]):
+            super().__init__(nodes)
+            self.idle_timeouts: list[int | None] = []
+
+        def dump_xml(self, idle_timeout_ms: int | None = None) -> list[UiNode]:
+            self.idle_timeouts.append(idle_timeout_ms)
+            return self.nodes
+
+    def test_holdings_uses_zero_idle_timeout_and_restores_default(self) -> None:
+        adb = self.RecordingAdb([node("Assets")])
+        trader = ZhuoruiTrader(adb)
+
+        def collect_fast() -> dict[str, list[dict[str, str]]]:
+            trader.current_nodes()
+            return {"cash": [], "securities": []}
+
+        trader.collect_positions_fast = Mock(side_effect=collect_fast)
+
+        self.assertEqual(trader.collect_positions(), {"cash": [], "securities": []})
+        self.assertEqual(adb.idle_timeouts, [0])
+
+        trader.current_nodes()
+        self.assertEqual(adb.idle_timeouts, [0, None])
+
+    def test_holdings_restores_default_after_failure(self) -> None:
+        adb = self.RecordingAdb([node("Assets")])
+        trader = ZhuoruiTrader(adb)
+
+        def fail_fast() -> dict[str, list[dict[str, str]]]:
+            trader.current_nodes()
+            raise ZhuoruiAutomationError("simulated holdings failure")
+
+        trader.collect_positions_fast = Mock(side_effect=fail_fast)
+
+        with self.assertRaisesRegex(ZhuoruiAutomationError, "simulated holdings failure"):
+            trader.collect_positions()
+        trader.current_nodes()
+
+        self.assertEqual(adb.idle_timeouts, [0, None])
+
+    def test_zero_idle_dump_uses_helper_with_positive_host_timeout(self) -> None:
+        adb = Adb.__new__(Adb)
+        adb._zero_idle_dump_helper_ready = True
+        shell_calls: list[tuple[tuple[str, ...], float]] = []
+        cmd_calls: list[tuple[tuple[str, ...], float]] = []
+        xml = '<hierarchy rotation="0"><node text="Assets" bounds="[0,0][1,1]" /></hierarchy>'
+
+        def shell(*args: str, timeout: float, check: bool) -> Mock:
+            shell_calls.append((args, timeout))
+            return Mock(returncode=0, stdout="OK (1 test)", stderr="")
+
+        def cmd(*args: str, timeout: float, check: bool) -> Mock:
+            cmd_calls.append((args, timeout))
+            if args[0] == "pull":
+                Path(args[2]).write_text(xml, encoding="utf-8")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        adb.shell = shell
+        adb.cmd = cmd
+
+        nodes = adb.dump_xml(idle_timeout_ms=0)
+
+        self.assertEqual([item.text for item in nodes], ["Assets"])
+        runner_calls = [
+            call
+            for call in shell_calls
+            if "app_process" in call[0] and "runtest" in call[0]
+        ]
+        self.assertEqual(len(runner_calls), 1)
+        self.assertGreater(runner_calls[0][1], 0)
+        self.assertTrue(
+            any(
+                "/zhuorui-zero-idle-dump-" in arg and arg.endswith(".jar")
+                for arg in runner_calls[0][0]
+            )
+        )
+        self.assertIn("ANDROID_DATA=/data", runner_calls[0][0])
+        self.assertFalse(
+            any(call[0][:2] == ("uiautomator", "dump") for call in shell_calls)
+        )
+        self.assertFalse(
+            any(call[0][:3] == ("exec-out", "uiautomator", "dump") for call in cmd_calls)
+        )
+        self.assertTrue(any(call[0][0] == "pull" for call in cmd_calls))
+
+    def test_default_dump_keeps_legacy_transport(self) -> None:
+        adb = Adb.__new__(Adb)
+        adb._dump_transport = None
+        cmd_calls: list[tuple[tuple[str, ...], float]] = []
+        xml = '<hierarchy rotation="0"><node text="Quotes" bounds="[0,0][1,1]" /></hierarchy>'
+
+        def cmd(*args: str, timeout: float, check: bool) -> Mock:
+            cmd_calls.append((args, timeout))
+            return Mock(returncode=0, stdout=xml, stderr="")
+
+        adb.cmd = cmd
+
+        nodes = adb.dump_xml()
+
+        self.assertEqual([item.text for item in nodes], ["Quotes"])
+        self.assertEqual(cmd_calls[0][0][:3], ("exec-out", "uiautomator", "dump"))
+        self.assertFalse(any("app_process" in call[0] for call in cmd_calls))
+
+    def test_zero_idle_helper_install_is_atomic(self) -> None:
+        adb = Adb.__new__(Adb)
+        adb._zero_idle_dump_helper_ready = False
+        shell_calls: list[tuple[str, ...]] = []
+        cmd_calls: list[tuple[str, ...]] = []
+
+        def shell(*args: str, timeout: float, check: bool) -> Mock:
+            shell_calls.append(args)
+            return Mock(returncode=1 if args[0] == "test" else 0, stdout="", stderr="")
+
+        def cmd(*args: str, timeout: float, check: bool) -> Mock:
+            cmd_calls.append(args)
+            return Mock(returncode=0, stdout="", stderr="")
+
+        adb.shell = shell
+        adb.cmd = cmd
+
+        adb._ensure_zero_idle_dump_helper()
+
+        push = next(call for call in cmd_calls if call[0] == "push")
+        move = next(call for call in shell_calls if call[0] == "mv")
+        self.assertTrue(push[2].endswith(".tmp"))
+        self.assertEqual(move[2], push[2])
+        self.assertNotEqual(move[3], push[2])
+        self.assertTrue(adb._zero_idle_dump_helper_ready)
 
 
 if __name__ == "__main__":

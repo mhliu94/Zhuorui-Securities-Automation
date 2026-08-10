@@ -9,6 +9,7 @@ tap the final trade button. Live submission requires --confirm-live-order.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,29 @@ DEFAULT_WAIT_TIMEOUT = 4.0
 ADB_COMMAND_TIMEOUT = 5.0
 ADB_DUMP_TIMEOUT = 2.5
 ADB_PULL_TIMEOUT = 2.0
+ZERO_IDLE_DUMP_COMMAND_TIMEOUT = 5.0
+# The stock Android dumper waits for a quiet accessibility window. Holdings can
+# change continuously during market hours, so use a tiny on-device helper that
+# bypasses that idle wait while retaining a finite host-side command deadline.
+ZERO_IDLE_DUMP_JAR = SCRIPT_DIR / "android" / "zhuorui-zero-idle-dump.jar"
+try:
+    ZERO_IDLE_DUMP_JAR_DIGEST = hashlib.sha256(ZERO_IDLE_DUMP_JAR.read_bytes()).hexdigest()[:16]
+except OSError:
+    ZERO_IDLE_DUMP_JAR_DIGEST = "missing"
+REMOTE_ZERO_IDLE_DUMP_JAR = (
+    f"/data/local/tmp/zhuorui-zero-idle-dump-{ZERO_IDLE_DUMP_JAR_DIGEST}.jar"
+)
+ZERO_IDLE_DUMP_CLASSPATH = ":".join(
+    (
+        "/system/framework/android.test.runner.jar",
+        "/system/framework/uiautomator.jar",
+        "/system/framework/android.test.base.jar",
+        REMOTE_ZERO_IDLE_DUMP_JAR,
+    )
+)
+ZERO_IDLE_DUMP_TEST = (
+    "com.zhuorui.automation.ZeroIdleHierarchyDumpTest#testDumpHierarchyWithoutIdleWait"
+)
 FAST_POLL = 0.12
 SHORT_SETTLE = 0.15
 FIELD_FOCUS_SETTLE = 0.35
@@ -290,6 +314,7 @@ class Adb:
         self.device = self._resolve_device(device)
         self._wm_size: Optional[tuple[int, int]] = None
         self._dump_transport: Optional[str] = None
+        self._zero_idle_dump_helper_ready = False
 
     @staticmethod
     def _resolve_adb(adb_path: Optional[str]) -> str:
@@ -428,7 +453,133 @@ class Adb:
         self._wm_size = int(match.group(1)), int(match.group(2))
         return self._wm_size
 
-    def dump_xml(self) -> list[UiNode]:
+    def _ensure_zero_idle_dump_helper(self, force: bool = False) -> None:
+        if self._zero_idle_dump_helper_ready and not force:
+            return
+        if not ZERO_IDLE_DUMP_JAR.is_file():
+            raise ZhuoruiAutomationError(
+                f"Zero-idle UI dump helper is missing: {ZERO_IDLE_DUMP_JAR}"
+            )
+        if not force:
+            present = self.shell(
+                "test", "-s", REMOTE_ZERO_IDLE_DUMP_JAR, timeout=1, check=False
+            )
+            if present.returncode == 0:
+                self._zero_idle_dump_helper_ready = True
+                return
+
+        remote_temp = f"{REMOTE_ZERO_IDLE_DUMP_JAR}.{os.getpid()}.tmp"
+        try:
+            pushed = self.cmd(
+                "push",
+                str(ZERO_IDLE_DUMP_JAR),
+                remote_temp,
+                timeout=ADB_COMMAND_TIMEOUT,
+                check=False,
+            )
+            if pushed.returncode != 0:
+                details = (pushed.stderr or pushed.stdout or "unknown adb error").strip()
+                raise ZhuoruiAutomationError(
+                    f"Could not install the zero-idle UI dump helper: {details}"
+                )
+            moved = self.shell(
+                "mv",
+                "-f",
+                remote_temp,
+                REMOTE_ZERO_IDLE_DUMP_JAR,
+                timeout=1,
+                check=False,
+            )
+            if moved.returncode != 0:
+                details = (moved.stderr or moved.stdout or "unknown adb error").strip()
+                raise ZhuoruiAutomationError(
+                    f"Could not activate the zero-idle UI dump helper: {details}"
+                )
+        finally:
+            self.shell("rm", "-f", remote_temp, timeout=1, check=False)
+        self._zero_idle_dump_helper_ready = True
+
+    def _dump_xml_without_idle_wait(self) -> list[UiNode]:
+        remote_name = f"zhuorui-zero-idle-window-{os.getpid()}-{time.time_ns()}.xml"
+        remote_path = f"/data/local/tmp/{remote_name}"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xml") as tmp:
+            local_path = Path(tmp.name)
+        errors: list[str] = []
+        try:
+            for attempt in range(2):
+                self._ensure_zero_idle_dump_helper(force=attempt > 0)
+                self.shell("rm", "-f", remote_path, timeout=1, check=False)
+                try:
+                    local_path.unlink()
+                except FileNotFoundError:
+                    pass
+                dumped = self.shell(
+                    "env",
+                    "ANDROID_DATA=/data",
+                    f"CLASSPATH={ZERO_IDLE_DUMP_CLASSPATH}",
+                    "app_process",
+                    "/system/bin",
+                    "com.android.commands.uiautomator.Launcher",
+                    "runtest",
+                    "-c",
+                    ZERO_IDLE_DUMP_TEST,
+                    "-e",
+                    "output",
+                    remote_name,
+                    "-e",
+                    "outputFormat",
+                    "simple",
+                    timeout=ZERO_IDLE_DUMP_COMMAND_TIMEOUT,
+                    check=False,
+                )
+                pulled = self.cmd(
+                    "pull",
+                    remote_path,
+                    str(local_path),
+                    timeout=ADB_PULL_TIMEOUT,
+                    check=False,
+                )
+                if (
+                    pulled.returncode == 0
+                    and local_path.exists()
+                    and local_path.stat().st_size > 0
+                ):
+                    raw = local_path.read_text(encoding="utf-8", errors="replace")
+                    try:
+                        return parse_ui(raw)
+                    except ZhuoruiAutomationError as exc:
+                        runner_details = (dumped.stderr or dumped.stdout or "").strip()
+                        errors.append(
+                            f"{exc}; runner output: {runner_details or '<none>'}"
+                        )
+                else:
+                    runner_details = (dumped.stderr or dumped.stdout or "").strip()
+                    pull_details = (pulled.stderr or pulled.stdout or "").strip()
+                    errors.append(
+                        f"runner output: {runner_details or '<none>'}; "
+                        f"pull output: {pull_details or '<none>'} "
+                        f"(exit {pulled.returncode})"
+                    )
+                self._zero_idle_dump_helper_ready = False
+            raise ZhuoruiAutomationError(
+                "Could not dump Android UI XML without an idle wait: "
+                + " | ".join(error for error in errors if error)
+            )
+        finally:
+            self.shell("rm", "-f", remote_path, timeout=1, check=False)
+            try:
+                local_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def dump_xml(self, idle_timeout_ms: Optional[int] = None) -> list[UiNode]:
+        if idle_timeout_ms is not None:
+            if idle_timeout_ms != 0:
+                raise ZhuoruiAutomationError(
+                    f"Only a zero UI idle timeout is supported, not {idle_timeout_ms}."
+                )
+            return self._dump_xml_without_idle_wait()
+
         direct_errors: list[str] = []
         if self._dump_transport != "file":
             for dump_args in (
@@ -1034,6 +1185,7 @@ class ZhuoruiTrader:
         self.prepared_order_type_name: Optional[str] = None
         self.prepared_limit_price: Optional[Decimal] = None
         self.market_reference_price: Optional[Decimal] = None
+        self._dump_idle_timeout_ms: Optional[int] = None
 
     def launch(self) -> None:
         self.adb.shell("am", "start", "-n", LAUNCH_ACTIVITY, timeout=5)
@@ -1079,7 +1231,9 @@ class ZhuoruiTrader:
         last_error: Optional[ZhuoruiAutomationError] = None
         for _ in range(3):
             try:
-                return self.adb.dump_xml()
+                if self._dump_idle_timeout_ms is None:
+                    return self.adb.dump_xml()
+                return self.adb.dump_xml(idle_timeout_ms=self._dump_idle_timeout_ms)
             except ZhuoruiAutomationError as exc:
                 last_error = exc
                 time.sleep(0.35)
@@ -1557,15 +1711,22 @@ class ZhuoruiTrader:
         raise ZhuoruiAutomationError("Cash Details did not open from the Net Assets tile.")
 
     def collect_positions(self) -> dict[str, list[dict[str, str]]]:
-        if self.is_fast_screen():
-            return self.collect_positions_fast()
+        previous_idle_timeout = self._dump_idle_timeout_ms
+        # Scope zero-idle dumps to the complete holdings query. Navigation can
+        # already expose live market values before the table is extracted.
+        self._dump_idle_timeout_ms = 0
+        try:
+            if self.is_fast_screen():
+                return self.collect_positions_fast()
 
-        self.return_to_landing_page()
-        assets_nodes = self.open_assets()
-        securities = self.collect_security_positions(assets_nodes)
-        cash_nodes = self.open_cash_details()
-        cash = self.collect_cash_positions(cash_nodes)
-        return {"cash": cash, "securities": securities}
+            self.return_to_landing_page()
+            assets_nodes = self.open_assets()
+            securities = self.collect_security_positions(assets_nodes)
+            cash_nodes = self.open_cash_details()
+            cash = self.collect_cash_positions(cash_nodes)
+            return {"cash": cash, "securities": securities}
+        finally:
+            self._dump_idle_timeout_ms = previous_idle_timeout
 
     def collect_positions_fast(self) -> dict[str, list[dict[str, str]]]:
         self.return_to_landing_page_fast()
