@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,8 +16,30 @@ from zhuorui_monitor import (
     parse_android_app_meminfo,
     parse_android_memory_summary,
     parse_datetime,
+    resolve_public_host,
     verify_admin_credentials,
 )
+
+
+class PublicHostTests(unittest.TestCase):
+    def test_explicit_host_takes_precedence(self):
+        with patch("zhuorui_monitor.detect_machine_ipv4") as detector:
+            self.assertEqual(resolve_public_host("monitor.example.com"), "monitor.example.com")
+        detector.assert_not_called()
+
+    def test_detected_machine_ip_takes_precedence_over_config(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_path = Path(temp_name) / "zhuorui_config.json"
+            config_path.write_text(json.dumps({"public_host": "fallback.example.com"}), encoding="utf-8")
+            with patch("zhuorui_monitor.detect_machine_ipv4", return_value="192.0.2.10"):
+                self.assertEqual(resolve_public_host(None, config_path), "192.0.2.10")
+
+    def test_config_is_used_when_detection_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            config_path = Path(temp_name) / "zhuorui_config.json"
+            config_path.write_text(json.dumps({"public_host": "fallback.example.com"}), encoding="utf-8")
+            with patch("zhuorui_monitor.detect_machine_ipv4", return_value=None):
+                self.assertEqual(resolve_public_host(None, config_path), "fallback.example.com")
 
 
 class FakeRunner:
@@ -460,7 +483,7 @@ class AuthenticationTests(unittest.TestCase):
             thread.join(timeout=5)
 
     def test_port_80_server_redirects_to_standard_https(self):
-        server = RedirectServer(("127.0.0.1", 0), "209.250.240.250", 443)
+        server = RedirectServer(("127.0.0.1", 0), "monitor.example.com", 443)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
@@ -471,7 +494,7 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(response.status, 308)
             self.assertEqual(
                 response.getheader("Location"),
-                "https://209.250.240.250/dashboard?view=live",
+                "https://monitor.example.com/dashboard?view=live",
             )
         finally:
             connection.close()

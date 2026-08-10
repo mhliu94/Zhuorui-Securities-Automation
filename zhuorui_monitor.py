@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import signal
+import socket
 import ssl
 import subprocess
 import sys
@@ -1538,7 +1539,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cert-file", help="PEM TLS certificate")
     parser.add_argument("--key-file", help="PEM TLS private key")
     parser.add_argument("--redirect-http-port", type=int, default=0, help="optional HTTP port that redirects to HTTPS")
-    parser.add_argument("--public-host", default="209.250.240.250", help="public hostname or IP used by the HTTP redirect")
+    parser.add_argument(
+        "--public-host",
+        help="public hostname or IP used by the HTTP redirect; detected automatically when omitted",
+    )
     parser.add_argument(
         "--allow-http",
         action="store_true",
@@ -1547,8 +1551,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def detect_machine_ipv4() -> str | None:
+    """Return the IPv4 address selected by the machine's default route."""
+    try:
+        endpoints = socket.getaddrinfo("example.com", 443, socket.AF_INET, socket.SOCK_DGRAM)
+        if not endpoints:
+            return None
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(endpoints[0][4])
+            address = str(probe.getsockname()[0]).strip()
+    except OSError:
+        return None
+    if not address or address.startswith("127.") or address == "0.0.0.0":
+        return None
+    return address
+
+
+def resolve_public_host(explicit_host: str | None, config_path: Path = PROJECT_ROOT / "zhuorui_config.json") -> str:
+    explicit = str(explicit_host or "").strip()
+    if explicit:
+        return explicit
+    detected = detect_machine_ipv4()
+    if detected:
+        return detected
+    configured = str(read_json(config_path).get("public_host") or "").strip()
+    return configured or "localhost"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.public_host = resolve_public_host(args.public_host)
     if not 1 <= args.port <= 65535:
         print("Port must be between 1 and 65535.", file=sys.stderr)
         return 2
