@@ -92,6 +92,13 @@ FAST_ASSETS_TODAYS_ORDERS_TAB = (230, 558)
 FAST_ASSETS_FIRST_ORDER_ROW = (540, 760)
 FAST_ASSETS_ORDER_CANCEL_BUTTON = (412, 873)
 FAST_CANCEL_ORDER_CONFIRM_BUTTON = (745, 1355)
+FAST_AD_CLOSE_BUTTON = (540, 1786)
+# The ad close button is centered at the same normalized point when Zhuorui is
+# rendered at resolutions other than the configured 1080x2424 fast screen.
+AD_CLOSE_X_RATIO = 0.5
+AD_CLOSE_Y_RATIO = FAST_AD_CLOSE_BUTTON[1] / FAST_SCREEN_SIZE[1]
+AD_CLASSIFICATION_RECHECK_SECONDS = 0.2
+AD_DISMISS_SETTLE_SECONDS = 0.6
 # Tap just inside the right edge of the first bottom-bar tab. Tapping near
 # the left edge can accidentally open Android's side menu.
 QUOTES_TAB_RIGHT_X_RATIO = (1 / 6) - 0.005
@@ -101,7 +108,9 @@ APP_BACK_X_RATIO = 0.063
 APP_BACK_Y_RATIO = 0.082
 SUCCESS_REVOKE_X_RATIO = 0.29
 SUCCESS_REVOKE_Y_RATIO = 0.895
-WATCHLIST_SYMBOL_SCORE_THRESHOLD = 0.70
+WATCHLIST_ROW_ID = ":id/vStock"
+WATCHLIST_SYMBOL_ID = ":id/vCode"
+WATCHLIST_LAST_PRICE_ID = ":id/vLast"
 HOME_SCREEN_REQUIRED_LABELS = ("Quotes", "Assets", "S-Invest", "Wealth", "News")
 HOME_SCREEN_LABEL_SCORE_THRESHOLD = 0.48
 EMPTY_POSITIONS_LABEL = "No positions yet"
@@ -110,6 +119,11 @@ POSITION_LANDING_BACK_TAPS = 5
 POSITION_LANDING_BACK_DELAY = 0.45
 ORDER_WATCHLIST_BACK_TAPS = 5
 ORDER_WATCHLIST_BACK_DELAY = 0.45
+ORDER_RETRY_LIMIT = 1
+ORDER_RESTART_SETTLE_SECONDS = 0.5
+ORDER_RESTART_READY_TIMEOUT = 10.0
+ORDER_RESTART_STABLE_READS = 2
+ORDER_RESTART_AD_RECHECK_READS = (4, 12)
 FILL_OR_KILL_REVOKE_DELAY = 3.0
 CANCEL_ORDER_SETTLE_SECONDS = 2.0
 MAX_CANCEL_ORDER_ATTEMPTS = 50
@@ -297,6 +311,185 @@ class UiNode:
     focused: bool
     password: bool
     bounds: Bounds
+
+
+@dataclass(frozen=True)
+class LightRegionStats:
+    mean: float
+    dark_fraction: float
+    bright_fraction: float
+    sample_count: int
+
+
+@dataclass(frozen=True)
+class AdScreenProfile:
+    width: int
+    height: int
+    center: LightRegionStats
+    outer: LightRegionStats
+    lower: LightRegionStats
+    footer: LightRegionStats
+
+
+@dataclass(frozen=True)
+class AdScreenClassification:
+    kind: str
+    profile: AdScreenProfile
+
+
+def _light_region_stats(samples: list[int], dark_count: int, bright_count: int) -> LightRegionStats:
+    count = len(samples)
+    if count <= 0:
+        raise ZhuoruiAutomationError("Ad-screen detection region did not contain any sampled pixels.")
+    return LightRegionStats(
+        mean=sum(samples) / count,
+        dark_fraction=dark_count / count,
+        bright_fraction=bright_count / count,
+        sample_count=count,
+    )
+
+
+def ad_screen_profile(image_path: Path) -> AdScreenProfile:
+    """Sample the same normalized brightness regions used by GigaMoney."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ZhuoruiAutomationError("Pillow is required for ad-screen detection.") from exc
+
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        if width < 100 or height < 100:
+            raise ZhuoruiAutomationError(
+                f"Ad-screen screenshot is unexpectedly small: {width}x{height}."
+            )
+
+        step = max(6, round(min(width, height) / 100))
+        luma_by_region: dict[str, list[int]] = {
+            "center": [],
+            "outer": [],
+            "lower": [],
+            "footer": [],
+        }
+        dark_by_region = {name: 0 for name in luma_by_region}
+        bright_by_region = {name: 0 for name in luma_by_region}
+        pixels = image.load()
+
+        for y in range(step // 2, height, step):
+            ny = y / height
+            for x in range(step // 2, width, step):
+                nx = x / width
+                if 0.22 <= nx <= 0.78 and 0.22 <= ny <= 0.70:
+                    region = "center"
+                elif 0.04 <= nx <= 0.96 and 0.76 <= ny <= 0.90:
+                    region = "lower"
+                elif 0.04 <= nx <= 0.96 and 0.90 < ny <= 0.965:
+                    region = "footer"
+                elif (
+                    (0.04 <= nx <= 0.96 and 0.06 <= ny < 0.18)
+                    or (
+                        (0.04 <= nx < 0.18 or 0.82 < nx <= 0.96)
+                        and 0.18 <= ny < 0.76
+                    )
+                ):
+                    region = "outer"
+                else:
+                    continue
+
+                red, green, blue = pixels[x, y]
+                luma = round((54 * red + 183 * green + 19 * blue) / 256)
+                max_channel = max(red, green, blue)
+                luma_by_region[region].append(luma)
+                if luma <= 90 and max_channel <= 125:
+                    dark_by_region[region] += 1
+                if luma >= 140 or max_channel >= 180:
+                    bright_by_region[region] += 1
+
+    stats = {
+        name: _light_region_stats(
+            luma_by_region[name],
+            dark_by_region[name],
+            bright_by_region[name],
+        )
+        for name in luma_by_region
+    }
+    return AdScreenProfile(
+        width=width,
+        height=height,
+        center=stats["center"],
+        outer=stats["outer"],
+        lower=stats["lower"],
+        footer=stats["footer"],
+    )
+
+
+def classify_ad_screen(image_path: Path) -> AdScreenClassification:
+    """Classify a screenshot with GigaMoney's tested brightness heuristic."""
+    profile = ad_screen_profile(image_path)
+    center_contrast = profile.center.mean - profile.outer.mean
+    central_candidate = (
+        center_contrast >= 14
+        and profile.center.bright_fraction >= 0.08
+        and profile.center.bright_fraction >= profile.outer.bright_fraction + 0.04
+    )
+    strong_center = (
+        profile.outer.mean <= 120
+        and profile.outer.bright_fraction <= 0.14
+        and center_contrast >= 22
+        and profile.center.bright_fraction >= 0.14
+        and profile.center.bright_fraction >= profile.outer.bright_fraction + 0.06
+    )
+    bottom_lit = (
+        profile.lower.mean >= 108
+        or profile.footer.mean >= 108
+        or profile.lower.bright_fraction >= 0.16
+        or profile.footer.bright_fraction >= 0.16
+    )
+    bottom_dark = (
+        profile.lower.mean <= 92
+        and profile.footer.mean <= 92
+        and profile.lower.dark_fraction >= 0.58
+        and profile.footer.dark_fraction >= 0.58
+        and profile.lower.bright_fraction <= 0.10
+        and profile.footer.bright_fraction <= 0.10
+        and profile.lower.mean <= profile.outer.mean + 25
+        and profile.footer.mean <= profile.outer.mean + 25
+        and profile.center.mean >= max(profile.lower.mean, profile.footer.mean) + 20
+    )
+
+    # Zhuorui's ad backdrop is lighter than GigaMoney's: white app chrome dims
+    # to a nearly uniform mid-gray rather than becoming dark. Keep this case
+    # deliberately strict—the live 1080x2424 ad fills most of the center with
+    # bright pixels while both bottom bands contain virtually no bright pixels.
+    zhuorui_strong_center = (
+        profile.outer.mean <= 130
+        and profile.outer.bright_fraction <= 0.10
+        and center_contrast >= 45
+        and profile.center.bright_fraction >= 0.45
+        and profile.center.bright_fraction >= profile.outer.bright_fraction + 0.25
+    )
+    zhuorui_dim_bottom = (
+        profile.lower.mean <= 135
+        and profile.footer.mean <= 135
+        and profile.lower.bright_fraction <= 0.05
+        and profile.footer.bright_fraction <= 0.05
+        and profile.center.mean >= max(profile.lower.mean, profile.footer.mean) + 40
+    )
+
+    # The lit-bottom rule deliberately wins so a normal confirmation dialog is
+    # never mistaken for an advertisement with a darkened backdrop. Zhuorui's
+    # tightly calibrated large-ad case is the sole exception.
+    if zhuorui_strong_center and zhuorui_dim_bottom:
+        kind = "Ad"
+    elif central_candidate and bottom_lit:
+        kind = "ConfirmationLike"
+    elif strong_center and bottom_dark:
+        kind = "Ad"
+    elif central_candidate:
+        kind = "Ambiguous"
+    else:
+        kind = "None"
+    return AdScreenClassification(kind=kind, profile=profile)
 
 
 def parse_bounds(raw: str) -> Bounds:
@@ -898,171 +1091,8 @@ class NumericOcr:
 
 @dataclass(frozen=True)
 class WatchlistSymbolMatch:
-    score: float
     tap_point: tuple[int, int]
     last_price: Optional[Decimal]
-
-
-class WatchlistSymbolMatcher:
-    def __init__(self, font_path: Path):
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-            import numpy as np
-        except ImportError as exc:
-            raise ZhuoruiAutomationError(
-                "Pillow and numpy are required for screenshot-based watchlist symbol detection."
-            ) from exc
-
-        self.Image = Image
-        self.ImageDraw = ImageDraw
-        self.ImageFont = ImageFont
-        self.np = np
-        self.font_path = font_path
-
-    @classmethod
-    def from_adb(cls, adb: Adb, temp_dir: Path) -> "WatchlistSymbolMatcher":
-        font_path = temp_dir / "Roboto-Regular.ttf"
-        adb.pull(ANDROID_ROBOTO_FONT, font_path)
-        return cls(font_path)
-
-    def find_symbol(
-        self,
-        screenshot_path: Path,
-        symbol: str,
-        price_ocr: Optional[NumericOcr] = None,
-    ) -> Optional["WatchlistSymbolMatch"]:
-        image = self.Image.open(screenshot_path).convert("RGB")
-        width, height = image.size
-        target = symbol.upper()
-        templates = self.render_target_templates(target)
-        best: Optional[WatchlistSymbolMatch] = None
-        for line_top, line_bottom in self.symbol_line_runs(image):
-            crop = image.crop(
-                (
-                    round(width * 0.07),
-                    max(0, line_top - 8),
-                    round(width * 0.30),
-                    min(height, line_bottom + 8),
-                )
-            )
-            score = self.score_symbol_crop(crop, templates)
-            center_y = (line_top + line_bottom) // 2
-            tap_point = (round(width * 0.14), center_y)
-            last_price = self.recognize_last_price(image, center_y, price_ocr)
-            candidate = WatchlistSymbolMatch(score=score, tap_point=tap_point, last_price=last_price)
-            if best is None or score > best.score:
-                best = candidate
-        if best and best.score >= WATCHLIST_SYMBOL_SCORE_THRESHOLD:
-            return best
-        return None
-
-    def recognize_last_price(self, image, symbol_center_y: int, price_ocr: Optional[NumericOcr]) -> Optional[Decimal]:
-        if price_ocr is None:
-            return None
-        width, _ = image.size
-        crop = image.crop(
-            (
-                round(width * 0.52),
-                max(0, symbol_center_y - 100),
-                round(width * 0.74),
-                max(0, symbol_center_y - 25),
-            )
-        )
-        price_text = price_ocr.recognize_crop(crop)
-        if "." not in price_text:
-            return None
-        price = parse_decimal_text(price_text)
-        if price is None or price <= 0:
-            return None
-        return price
-
-    def symbol_line_runs(self, image) -> list[tuple[int, int]]:
-        width, height = image.size
-        x_start = round(width * 0.02)
-        x_end = round(width * 0.23)
-        y_start = round(height * 0.25)
-        y_end = round(height * 0.90)
-        active_rows: list[int] = []
-        min_pixels = max(8, round((x_end - x_start) * 0.04))
-
-        for y in range(y_start, y_end):
-            count = 0
-            for x in range(x_start, x_end):
-                red, green, blue = image.getpixel((x, y))
-                brightness = (red + green + blue) / 3
-                if (
-                    brightness > 70
-                    and not (red > 245 and green > 245 and blue > 245)
-                    and not (abs(red - green) < 5 and abs(green - blue) < 5 and brightness < 100)
-                ):
-                    count += 1
-            if count >= min_pixels:
-                active_rows.append(y)
-
-        runs = contiguous_runs(active_rows)
-        text_runs = [
-            run
-            for run in runs
-            if 12 <= run[1] - run[0] + 1 <= 42
-        ]
-        symbol_runs: list[tuple[int, int]] = []
-        previous: Optional[tuple[int, int]] = None
-        for run in text_runs:
-            if previous is not None:
-                gap = run[0] - previous[1]
-                if 18 <= gap <= 65:
-                    symbol_runs.append(run)
-            previous = run
-        return symbol_runs
-
-    def render_target_templates(self, target: str) -> list[tuple[object, int, int, float]]:
-        templates: list[tuple[object, int, int, float]] = []
-        for size in range(18, 36):
-            font = self.ImageFont.truetype(str(self.font_path), size)
-            bbox = font.getbbox(target)
-            image = self.Image.new(
-                "L",
-                (max(1, bbox[2] - bbox[0]) + 8, max(1, bbox[3] - bbox[1]) + 8),
-                255,
-            )
-            draw = self.ImageDraw.Draw(image)
-            draw.text((4 - bbox[0], 4 - bbox[1]), target, font=font, fill=0)
-            array = self.np.array(image)
-            ys, xs = self.np.where(array < 220)
-            if len(xs) == 0:
-                continue
-            mask = (array[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1] < 220).astype(self.np.float32)
-            templates.append((mask, mask.shape[1], mask.shape[0], float(mask.sum())))
-        return templates
-
-    def score_symbol_crop(self, crop, templates: list[tuple[object, int, int, float]]) -> float:
-        array = self.np.array(crop.convert("RGB"))
-        mask = (
-            (array[:, :, 0] < 230)
-            | (array[:, :, 1] < 230)
-            | (array[:, :, 2] < 230)
-        ).astype(self.np.float32)
-        ys, xs = self.np.where(mask > 0)
-        if len(xs) == 0:
-            return -1.0
-        mask = mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
-        padded = self.np.pad(mask, ((8, 8), (8, 8)), constant_values=0)
-        best = -1.0
-        for template, template_width, template_height, template_count in templates:
-            if template_count <= 0:
-                continue
-            if template_height > padded.shape[0] or template_width > padded.shape[1]:
-                continue
-            for y in range(0, padded.shape[0] - template_height + 1):
-                for x in range(0, padded.shape[1] - template_width + 1):
-                    patch = padded[y : y + template_height, x : x + template_width]
-                    intersection = float((patch * template).sum())
-                    missed = (template_count - intersection) / template_count
-                    extra = max(0.0, (float(patch.sum()) - intersection) / template_count)
-                    score = intersection / template_count - 0.2 * extra - 0.2 * missed
-                    if score > best:
-                        best = score
-        return best
 
 
 class HomeScreenTextOcr:
@@ -1190,7 +1220,9 @@ class ZhuoruiTrader:
     def launch(self) -> None:
         self.adb.shell("am", "start", "-n", LAUNCH_ACTIVITY, timeout=5)
         self.wait_for_app_foreground(timeout=7.0)
-        time.sleep(0.2)
+        handled_ad = self.dismiss_ad_screen_if_present()
+        if not handled_ad:
+            time.sleep(0.2)
         if self.fast_path:
             return
         try:
@@ -1217,6 +1249,7 @@ class ZhuoruiTrader:
     def ensure_app_foreground(self, launch_if_needed: bool) -> None:
         foreground = self.adb.foreground_package()
         if foreground == PACKAGE:
+            self.dismiss_ad_screen_if_present()
             return
         if not launch_if_needed:
             raise ZhuoruiAutomationError(
@@ -1227,13 +1260,117 @@ class ZhuoruiTrader:
             print(f"Zhuorui is not foreground ({foreground}); launching Zhuorui.", file=sys.stderr)
         self.launch()
 
-    def current_nodes(self) -> list[UiNode]:
+    def restart_app_for_order_retry(self) -> None:
+        self.prepared_submit = None
+        self.prepared_order_type_name = None
+        self.prepared_limit_price = None
+        self.market_reference_price = None
+        self.adb.shell("am", "force-stop", PACKAGE, timeout=ADB_COMMAND_TIMEOUT)
+        time.sleep(ORDER_RESTART_SETTLE_SECONDS)
+        self.launch()
+        # Foreground readiness alone can still be the splash screen. Do not
+        # press Back until the authenticated landing page has appeared and
+        # remained recognizable across consecutive hierarchy reads.
+        self.wait_for_order_retry_landing()
+
+    def wait_for_order_retry_landing(self) -> None:
+        readiness_timeout = max(ORDER_RESTART_READY_TIMEOUT, self.wait_timeout)
+        deadline = time.monotonic() + readiness_timeout
+        stable_reads = 0
+        unready_reads = 0
+        last_visible: list[str] = []
         last_error: Optional[ZhuoruiAutomationError] = None
+        while time.monotonic() < deadline:
+            try:
+                nodes = self.current_nodes(idle_timeout_ms=0)
+                last_error = None
+            except ZhuoruiAutomationError as exc:
+                last_error = exc
+                stable_reads = 0
+                time.sleep(FAST_POLL)
+                continue
+
+            last_visible = [self.node_label(node) for node in nodes if self.node_label(node)]
+            if self.is_logged_out_landing_page(nodes):
+                self.ensure_logged_in(nodes)
+                stable_reads = 0
+                # Login may intentionally wait three minutes during Beijing
+                # business hours. Give the post-login landing page its own
+                # complete readiness window.
+                deadline = time.monotonic() + readiness_timeout
+                continue
+            if self.is_logged_in_landing_page(nodes):
+                stable_reads += 1
+                if stable_reads >= ORDER_RESTART_STABLE_READS:
+                    return
+            else:
+                stable_reads = 0
+                unready_reads += 1
+                if unready_reads in ORDER_RESTART_AD_RECHECK_READS:
+                    try:
+                        if self.dismiss_ad_screen_if_present():
+                            stable_reads = 0
+                    except ZhuoruiAutomationError as exc:
+                        last_error = exc
+            time.sleep(FAST_POLL)
+
+        detail = f" Last hierarchy error: {last_error}." if last_error is not None else ""
+        raise ZhuoruiAutomationError(
+            "Zhuorui did not reach a stable logged-in landing screen after restart. "
+            f"Visible text: {last_visible[:16]}.{detail}"
+        )
+
+    def current_ad_screen_classification(self) -> AdScreenClassification:
+        with tempfile.TemporaryDirectory(prefix="zhuorui-ad-guard-") as temp_name:
+            screenshot_path = Path(temp_name) / "screen.png"
+            self.adb.screenshot(screenshot_path)
+            return classify_ad_screen(screenshot_path)
+
+    def stable_ad_screen_classification(self) -> AdScreenClassification:
+        first = self.current_ad_screen_classification()
+        if first.kind not in {"Ad", "Ambiguous"}:
+            return first
+
+        time.sleep(AD_CLASSIFICATION_RECHECK_SECONDS)
+        second = self.current_ad_screen_classification()
+        if first.kind == "Ad" and second.kind == "Ad":
+            return second
+        if second.kind in {"None", "ConfirmationLike"}:
+            return second
+        return AdScreenClassification(kind="Ambiguous", profile=second.profile)
+
+    def ad_close_point(self) -> tuple[int, int]:
+        width, height = self.adb.wm_size()
+        if (width, height) == FAST_SCREEN_SIZE:
+            return FAST_AD_CLOSE_BUTTON
+        return round(width * AD_CLOSE_X_RATIO), round(height * AD_CLOSE_Y_RATIO)
+
+    def dismiss_ad_screen_if_present(self) -> bool:
+        classification = self.stable_ad_screen_classification()
+        if classification.kind != "Ad":
+            return False
+
+        profile = classification.profile
+        print(
+            "Ad screen detected "
+            f"(center={profile.center.mean:.0f}, lower={profile.lower.mean:.0f}, "
+            f"footer={profile.footer.mean:.0f}); tapping its close button.",
+            file=sys.stderr,
+        )
+        self.adb.tap(*self.ad_close_point())
+        time.sleep(AD_DISMISS_SETTLE_SECONDS)
+        return True
+
+    def current_nodes(self, idle_timeout_ms: Optional[int] = None) -> list[UiNode]:
+        last_error: Optional[ZhuoruiAutomationError] = None
+        effective_idle_timeout_ms = (
+            self._dump_idle_timeout_ms if idle_timeout_ms is None else idle_timeout_ms
+        )
         for _ in range(3):
             try:
-                if self._dump_idle_timeout_ms is None:
+                if effective_idle_timeout_ms is None:
                     return self.adb.dump_xml()
-                return self.adb.dump_xml(idle_timeout_ms=self._dump_idle_timeout_ms)
+                return self.adb.dump_xml(idle_timeout_ms=effective_idle_timeout_ms)
             except ZhuoruiAutomationError as exc:
                 last_error = exc
                 time.sleep(0.35)
@@ -2136,37 +2273,99 @@ class ZhuoruiTrader:
         width, height = self.adb.wm_size()
         self.adb.swipe(width // 2, round(height * 0.30), width // 2, round(height * 0.88), 650)
 
+    def watchlist_symbol_match(
+        self,
+        nodes: list[UiNode],
+        symbol: str,
+    ) -> Optional[WatchlistSymbolMatch]:
+        wanted = symbol.strip().upper()
+        code_nodes = [
+            node
+            for node in nodes_by_id(nodes, WATCHLIST_SYMBOL_ID)
+            if node.text.strip().upper() == wanted
+        ]
+        if not code_nodes:
+            return None
+        if len(code_nodes) != 1:
+            raise ZhuoruiAutomationError(
+                f"Multiple visible watchlist rows matched {wanted}; refusing to choose one."
+            )
+
+        code_node = code_nodes[0]
+        code_x, code_y = code_node.bounds.center
+        row_nodes = [
+            node
+            for node in nodes_by_id(nodes, WATCHLIST_ROW_ID)
+            if node.bounds.left <= code_x <= node.bounds.right
+            and node.bounds.top <= code_y <= node.bounds.bottom
+        ]
+        if not row_nodes:
+            raise ZhuoruiAutomationError(
+                f"Watchlist symbol {wanted} was visible but its containing row was not found."
+            )
+        row = min(row_nodes, key=lambda node: node.bounds.width * node.bounds.height)
+
+        price_nodes = []
+        for node in nodes_by_id(nodes, WATCHLIST_LAST_PRICE_ID):
+            price_x, price_y = node.bounds.center
+            if (
+                row.bounds.left <= price_x <= row.bounds.right
+                and row.bounds.top <= price_y <= row.bounds.bottom
+            ):
+                price_nodes.append(node)
+        if len(price_nodes) > 1:
+            raise ZhuoruiAutomationError(
+                f"Multiple regular last prices were found in the {wanted} watchlist row."
+            )
+        last_price = parse_decimal_text(price_nodes[0].text) if price_nodes else None
+        if last_price is not None and last_price <= 0:
+            last_price = None
+        return WatchlistSymbolMatch(tap_point=code_node.bounds.center, last_price=last_price)
+
     def open_symbol_from_watchlist(self, symbol: str) -> Optional[Decimal]:
         self.return_to_watchlist_landing()
-        with tempfile.TemporaryDirectory(prefix="zhuorui-watchlist-") as temp_name:
-            temp_dir = Path(temp_name)
-            screenshot_path = temp_dir / "watchlist.png"
-            matcher = WatchlistSymbolMatcher.from_adb(self.adb, temp_dir)
-            price_ocr = NumericOcr(matcher.font_path)
-            for attempt in range(2):
-                self.tap_quotes_tab_fast()
-                time.sleep(0.25 if attempt == 0 else 0.5)
-                self.adb.screenshot(screenshot_path)
-                match = matcher.find_symbol(screenshot_path, symbol, price_ocr=price_ocr)
-                if match:
-                    x, y = match.tap_point
-                    if self.fast_path:
-                        price_note = (
-                            f"; last price {decimal_to_input_text(match.last_price)}"
-                            if match.last_price is not None
-                            else ""
-                        )
-                        print(
-                            f"Watchlist OCR matched {symbol.upper()} at score {match.score:.2f}{price_note}; tapping row.",
-                            file=sys.stderr,
-                        )
-                    self.adb.tap(x, y)
-                    time.sleep(0.8)
-                    return match.last_price
+        last_lookup_error: Optional[ZhuoruiAutomationError] = None
+        visible_symbols: list[str] = []
+        for attempt in range(2):
+            self.tap_quotes_tab_fast()
+            time.sleep(0.25 if attempt == 0 else 0.5)
+            nodes = self.current_nodes(idle_timeout_ms=0)
+            visible_symbols = [
+                node.text.strip().upper()
+                for node in nodes_by_id(nodes, WATCHLIST_SYMBOL_ID)
+                if node.text.strip()
+            ]
+            try:
+                match = self.watchlist_symbol_match(nodes, symbol)
+            except ZhuoruiAutomationError as exc:
+                last_lookup_error = exc
+                continue
+            last_lookup_error = None
+            if match:
+                x, y = match.tap_point
+                if self.fast_path:
+                    price_note = (
+                        f"; last price {decimal_to_input_text(match.last_price)}"
+                        if match.last_price is not None
+                        else ""
+                    )
+                    print(
+                        f"Watchlist UI matched {symbol.upper()}{price_note}; tapping row.",
+                        file=sys.stderr,
+                    )
+                self.adb.tap(x, y)
+                time.sleep(0.8)
+                return match.last_price
+        if last_lookup_error is not None:
             raise ZhuoruiAutomationError(
-                f"{symbol.upper()} was not found in the visible watchlist. "
-                "Add it to the watchlist and keep it visible without scrolling."
-            )
+                f"Could not safely identify {symbol.upper()} in the visible watchlist: "
+                f"{last_lookup_error}"
+            ) from last_lookup_error
+        visible_note = f" Visible symbols: {visible_symbols[:12]}." if visible_symbols else ""
+        raise ZhuoruiAutomationError(
+            f"{symbol.upper()} was not found in the visible watchlist. "
+            f"Add it to the watchlist and keep it visible without scrolling.{visible_note}"
+        )
 
     def return_to_watchlist_landing(self) -> None:
         self.return_to_home_screen_by_back(
@@ -3009,7 +3208,16 @@ class ZhuoruiTrader:
 
             if self.looks_successful(nodes):
                 if dismiss_success:
-                    self.dismiss_order_success_dialog(nodes)
+                    try:
+                        self.dismiss_order_success_dialog(nodes)
+                    except ZhuoruiAutomationError as exc:
+                        # Submission success is already known. Cleanup failure
+                        # must not turn it into an order retry and risk a duplicate.
+                        print(
+                            f"Order was submitted, but its success dialog could not be dismissed: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 return
 
             if self.looks_error(nodes):
@@ -3732,10 +3940,15 @@ def quantity_from_notional(notional_usd: Decimal, reference_price: Decimal) -> i
     return quantity
 
 
-def submit_trading_command(trader: "ZhuoruiTrader", command: TradingCommand, trade_password: Optional[str]) -> dict:
-    operation_name = order_operation_name(command.order_type)
-    started_at = time.monotonic()
-    succeeded = False
+def submit_trading_command_once(
+    trader: "ZhuoruiTrader",
+    command: TradingCommand,
+    trade_password: Optional[str],
+    *,
+    revoke_delay: float = FILL_OR_KILL_REVOKE_DELAY,
+    assume_current_symbol: bool = False,
+    launch_if_needed: bool = True,
+) -> dict:
     if command.order_type == "fok":
         app_order_type = "limit"
         fill_or_kill = True
@@ -3743,49 +3956,111 @@ def submit_trading_command(trader: "ZhuoruiTrader", command: TradingCommand, tra
         app_order_type = command.order_type
         fill_or_kill = False
 
-    try:
-        trader.ensure_app_foreground(launch_if_needed=True)
-        quantity = command.quantity
-        assume_current_symbol = False
-        notional_reference_price: Optional[Decimal] = None
-        if quantity is None:
-            require(
-                command.order_type == "market" and command.notional_usd is not None,
-                "Only MARKET_ORDER supports notional_usd without qty_shares.",
-            )
-            notional_reference_price = trader.open_symbol_from_watchlist(command.symbol) or trader.read_quote_last_price()
-            require(
-                notional_reference_price is not None,
-                "Could not OCR the last traded price needed to convert notional_usd to qty_shares.",
-            )
-            quantity = quantity_from_notional(command.notional_usd, notional_reference_price)
-            assume_current_symbol = True
-
-        trader.prepare_order(
-            symbol=command.symbol,
-            side=command.side,
-            quantity=quantity,
-            order_type_name=app_order_type,
-            limit_price=command.limit_price,
-            trade_password=trade_password,
-            assume_current_symbol=assume_current_symbol,
+    trader.ensure_app_foreground(launch_if_needed=launch_if_needed)
+    quantity = command.quantity
+    prepare_assume_current_symbol = assume_current_symbol
+    notional_reference_price: Optional[Decimal] = None
+    if quantity is None:
+        require(
+            command.order_type == "market" and command.notional_usd is not None,
+            "Only MARKET_ORDER supports notional_usd without qty_shares.",
         )
-        if fill_or_kill:
-            trader.submit_fill_or_kill_order(password=trade_password)
-        else:
-            trader.submit_prepared_order(password=trade_password)
+        notional_reference_price = trader.open_symbol_from_watchlist(command.symbol) or trader.read_quote_last_price()
+        require(
+            notional_reference_price is not None,
+            "Could not read the last traded price needed to convert notional_usd to qty_shares.",
+        )
+        quantity = quantity_from_notional(command.notional_usd, notional_reference_price)
+        prepare_assume_current_symbol = True
 
-        result = {
-            "prepared_order_type": trader.prepared_order_type_name,
-            "resolved_quantity": quantity,
-            "submitted_limit_price": trader.prepared_limit_price,
-        }
-        if notional_reference_price is not None:
-            result["notional_reference_price"] = notional_reference_price
-        if trader.market_reference_price is not None:
-            result["market_reference_price"] = trader.market_reference_price
-        succeeded = True
-        return result
+    trader.prepare_order(
+        symbol=command.symbol,
+        side=command.side,
+        quantity=quantity,
+        order_type_name=app_order_type,
+        limit_price=command.limit_price,
+        trade_password=trade_password,
+        assume_current_symbol=prepare_assume_current_symbol,
+    )
+    if fill_or_kill:
+        trader.submit_fill_or_kill_order(password=trade_password, revoke_delay=revoke_delay)
+    else:
+        trader.submit_prepared_order(password=trade_password)
+
+    result = {
+        "prepared_order_type": trader.prepared_order_type_name,
+        "resolved_quantity": quantity,
+        "submitted_limit_price": trader.prepared_limit_price,
+    }
+    if notional_reference_price is not None:
+        result["notional_reference_price"] = notional_reference_price
+    if trader.market_reference_price is not None:
+        result["market_reference_price"] = trader.market_reference_price
+    return result
+
+
+def submit_trading_command(
+    trader: "ZhuoruiTrader",
+    command: TradingCommand,
+    trade_password: Optional[str],
+    *,
+    revoke_delay: float = FILL_OR_KILL_REVOKE_DELAY,
+    assume_current_symbol: bool = False,
+    launch_if_needed: bool = True,
+) -> dict:
+    operation_name = order_operation_name(command.order_type)
+    started_at = time.monotonic()
+    succeeded = False
+    first_error: Optional[ZhuoruiAutomationError] = None
+
+    try:
+        for attempt in range(ORDER_RETRY_LIMIT + 1):
+            attempt_started_at = time.monotonic()
+            try:
+                result = submit_trading_command_once(
+                    trader,
+                    command,
+                    trade_password,
+                    revoke_delay=revoke_delay,
+                    # Killing the app invalidates the one-shot CLI's promise
+                    # that the desired symbol is already open.
+                    assume_current_symbol=assume_current_symbol and attempt == 0,
+                    launch_if_needed=launch_if_needed if attempt == 0 else True,
+                )
+            except ZhuoruiAutomationError as exc:
+                if attempt >= ORDER_RETRY_LIMIT:
+                    if first_error is not None:
+                        raise ZhuoruiAutomationError(
+                            f"{operation_name.title()} failed on the initial attempt ({first_error}) "
+                            f"and retry ({exc})."
+                        ) from exc
+                    raise
+
+                first_error = exc
+                attempt_duration = elapsed_seconds(attempt_started_at)
+                print(
+                    f"{operation_name.title()} attempt {attempt + 1} of {ORDER_RETRY_LIMIT + 1} "
+                    f"failed after {attempt_duration:.3f} seconds for {command.command_id}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(
+                    f"Force-stopping and restarting Zhuorui before the one allowed retry "
+                    f"for {command.command_id}.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    trader.restart_app_for_order_retry()
+                except ZhuoruiAutomationError as restart_exc:
+                    raise ZhuoruiAutomationError(
+                        f"{operation_name.title()} initial attempt failed ({exc}); "
+                        f"Zhuorui could not be restarted for retry ({restart_exc})."
+                    ) from restart_exc
+                continue
+
+            succeeded = True
+            return result
     finally:
         duration = elapsed_seconds(started_at)
         if succeeded:
@@ -4281,16 +4556,37 @@ def main(argv: list[str]) -> int:
                 print(f"Cancelled {result['cancelled_orders']} order(s).")
             return 0
 
-        runtime.trader.ensure_app_foreground(launch_if_needed=runtime.launch_app or not args.assume_current_symbol)
-        runtime.trader.prepare_order(
-            symbol=args.symbol.upper(),
-            side=args.side,
-            quantity=args.quantity,
-            order_type_name=args.order_type,
-            limit_price=args.limit_price,
-            trade_password=runtime.trade_password,
-            assume_current_symbol=args.assume_current_symbol,
-        )
+        live_operation = args.live or args.fill_or_kill
+        if live_operation:
+            command = TradingCommand(
+                command_id="one-shot-order",
+                symbol=args.symbol.upper(),
+                side=args.side,
+                quantity=args.quantity,
+                order_type="fok" if args.fill_or_kill else args.order_type,
+                limit_price=args.limit_price,
+            )
+            submit_trading_command(
+                runtime.trader,
+                command,
+                runtime.trade_password,
+                revoke_delay=args.revoke_delay,
+                assume_current_symbol=args.assume_current_symbol,
+                launch_if_needed=runtime.launch_app or not args.assume_current_symbol,
+            )
+        else:
+            runtime.trader.ensure_app_foreground(
+                launch_if_needed=runtime.launch_app or not args.assume_current_symbol
+            )
+            runtime.trader.prepare_order(
+                symbol=args.symbol.upper(),
+                side=args.side,
+                quantity=args.quantity,
+                order_type_name=args.order_type,
+                limit_price=args.limit_price,
+                trade_password=runtime.trade_password,
+                assume_current_symbol=args.assume_current_symbol,
+            )
 
         order_summary = f"{args.order_type.upper()} {args.side.upper()} {args.quantity} {args.symbol.upper()}"
         if args.order_type == "market":
@@ -4304,7 +4600,7 @@ def main(argv: list[str]) -> int:
         elif args.order_type == "limit":
             order_summary += f" @ {decimal_to_input_text(args.limit_price)}"
 
-        if not args.live and not args.fill_or_kill:
+        if not live_operation:
             print(
                 f"Dry run complete: prepared {order_summary}. "
                 "The final trade button was not tapped."
@@ -4312,11 +4608,9 @@ def main(argv: list[str]) -> int:
             return 0
 
         if args.fill_or_kill:
-            runtime.trader.submit_fill_or_kill_order(password=runtime.trade_password, revoke_delay=args.revoke_delay)
             print(f"Submitted {order_summary}, waited {args.revoke_delay:g}s, and tapped Revoke.")
             return 0
 
-        runtime.trader.submit_prepared_order(password=runtime.trade_password)
         print(f"Submitted {order_summary}.")
         return 0
     except ZhuoruiAutomationError as exc:
