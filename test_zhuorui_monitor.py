@@ -4,15 +4,17 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from zhuorui_monitor import (
+    ActionResult,
     LoginLimiter,
     RedirectServer,
     ZhuoruiController,
     ZhuoruiServer,
+    in_scheduled_restart_window,
     parse_android_app_meminfo,
     parse_android_memory_summary,
     parse_datetime,
@@ -40,6 +42,17 @@ class PublicHostTests(unittest.TestCase):
             config_path.write_text(json.dumps({"public_host": "fallback.example.com"}), encoding="utf-8")
             with patch("zhuorui_monitor.detect_machine_ipv4", return_value=None):
                 self.assertEqual(resolve_public_host(None, config_path), "fallback.example.com")
+
+
+class ScheduledRestartWindowTests(unittest.TestCase):
+    def test_window_uses_daylight_aware_eastern_time(self):
+        self.assertTrue(in_scheduled_restart_window(datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)))
+        self.assertTrue(in_scheduled_restart_window(datetime(2026, 1, 15, 1, 1, tzinfo=timezone.utc)))
+
+    def test_window_includes_the_900_pm_minute_only(self):
+        self.assertFalse(in_scheduled_restart_window(datetime(2026, 8, 15, 0, 0, 59, tzinfo=timezone.utc)))
+        self.assertTrue(in_scheduled_restart_window(datetime(2026, 8, 15, 1, 0, 59, tzinfo=timezone.utc)))
+        self.assertFalse(in_scheduled_restart_window(datetime(2026, 8, 15, 1, 1, tzinfo=timezone.utc)))
 
 
 class FakeRunner:
@@ -157,6 +170,55 @@ class ZhuoruiControllerTests(unittest.TestCase):
         self.assertEqual(status["state"], "running")
         self.assertEqual(status["device"], "emulator-5554")
 
+    def test_running_emulator_reports_start_and_duration(self):
+        adb = self.make_adb()
+        started = datetime.now(timezone.utc) - timedelta(hours=3, minutes=4)
+        self.write_json(
+            "zhuorui_config.json",
+            {"adb": str(adb), "device": "emulator-5554", "avd": "Pixel_10_2"},
+        )
+        self.write_json(
+            "zhuorui_emulator.current.json",
+            {"pid": 4321, "started_utc": started.isoformat()},
+        )
+        controller = ZhuoruiController(
+            self.root,
+            probe=lambda pid: {"running": True, "started_epoch": started.timestamp()},
+            runner=FakeRunner("List of devices attached\nemulator-5554\tdevice\n"),
+        )
+
+        status = controller.emulator_status(started + timedelta(hours=3, minutes=4))
+
+        self.assertEqual(status["duration_seconds"], 11040)
+        self.assertIsNotNone(parse_datetime(status["started_at"]))
+
+    def test_start_emulator_forces_configured_acceleration(self):
+        adb = self.make_adb()
+        emulator = self.root / "sdk" / "emulator" / "emulator.exe"
+        emulator.parent.mkdir(parents=True)
+        emulator.write_bytes(b"")
+        self.write_json(
+            "zhuorui_config.json",
+            {
+                "adb": str(adb),
+                "emulator": str(emulator),
+                "device": "emulator-5554",
+                "avd": "Pixel_10_2",
+                "emulator_accel": "on",
+            },
+        )
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+
+        with patch("zhuorui_monitor.subprocess.Popen") as popen:
+            popen.return_value.pid = 4321
+            result = controller.start_emulator()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(emulator), "-avd", "Pixel_10_2", "-accel", "on"],
+        )
+
     def test_start_listener_uses_existing_powershell_control(self):
         (self.root / "start_zhuorui_listener.ps1").write_text("", encoding="utf-8")
         control_runner = FakeRunner()
@@ -170,6 +232,85 @@ class ZhuoruiControllerTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertIn("start_zhuorui_listener.ps1", control_runner.calls[0][-1])
+
+    def test_web_ui_emulator_start_records_failed_attempt(self):
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+
+        result = controller.perform("emulator/start")
+
+        self.assertFalse(result.ok)
+        metadata = json.loads((self.root / "zhuorui_emulator.current.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["last_restart_source"], "web_ui")
+        self.assertEqual(metadata["last_restart_state"], "failed")
+        self.assertIsNotNone(parse_datetime(metadata["last_restart_utc"]))
+
+    def test_scheduled_restart_observes_order_and_delays(self):
+        now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+        events = []
+        controller.stop_script = Mock(side_effect=lambda: events.append("stop listener") or ActionResult(True, "done"))
+        controller.stop_emulator = Mock(side_effect=lambda: events.append("stop emulator") or ActionResult(True, "done"))
+        controller._start_emulator = Mock(side_effect=lambda: events.append("start emulator") or ActionResult(True, "done"))
+        controller._foreground_zhuorui = Mock(
+            side_effect=lambda _waiter: events.append("foreground Zhuorui") or ActionResult(True, "done")
+        )
+        controller.start_script = Mock(side_effect=lambda: events.append("start listener") or ActionResult(True, "done"))
+        waits = []
+
+        result = controller.scheduled_restart_if_due(
+            now,
+            waiter=lambda seconds: waits.append(seconds) or False,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            events,
+            ["stop listener", "stop emulator", "start emulator", "foreground Zhuorui", "start listener"],
+        )
+        self.assertEqual(waits, [60, 120])
+        metadata = json.loads((self.root / "zhuorui_emulator.current.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["last_restart_utc"], "2026-08-15T00:01:00Z")
+        self.assertEqual(metadata["last_restart_state"], "succeeded")
+
+    def test_scheduled_restart_guard_uses_web_ui_attempt_time(self):
+        now = datetime(2026, 8, 15, 0, 30, tzinfo=timezone.utc)
+        self.write_json(
+            "zhuorui_emulator.current.json",
+            {"last_restart_utc": (now - timedelta(minutes=30)).isoformat()},
+        )
+        controller = ZhuoruiController(self.root, runner=FakeRunner())
+        controller.stop_script = Mock(return_value=ActionResult(True, "done"))
+
+        result = controller.scheduled_restart_if_due(now, waiter=lambda _seconds: False)
+
+        self.assertIsNone(result)
+        controller.stop_script.assert_not_called()
+
+    def test_foreground_failure_after_five_tries_stops_emulator_again(self):
+        adb = self.make_adb()
+        self.write_json(
+            "zhuorui_config.json",
+            {"adb": str(adb), "device": "emulator-5554", "avd": "Pixel_10_2"},
+        )
+        now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
+        runner = FakeRunner()
+        controller = ZhuoruiController(self.root, runner=runner)
+        controller.stop_script = Mock(return_value=ActionResult(True, "done"))
+        controller.stop_emulator = Mock(side_effect=[ActionResult(True, "done"), ActionResult(True, "done")])
+        controller._start_emulator = Mock(return_value=ActionResult(True, "done"))
+        controller.start_script = Mock(return_value=ActionResult(True, "done"))
+
+        result = controller.scheduled_restart_if_due(now, waiter=lambda _seconds: False)
+
+        self.assertFalse(result.ok)
+        self.assertIn("5 tries", result.message)
+        self.assertEqual(controller.stop_emulator.call_count, 2)
+        controller.start_script.assert_not_called()
+        launch_calls = [call for call in runner.calls if "start" in call and "-n" in call]
+        self.assertEqual(len(launch_calls), 5)
+        metadata = json.loads((self.root / "zhuorui_emulator.current.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["last_restart_state"], "failed")
+        self.assertEqual(metadata["last_restart_utc"], "2026-08-15T00:01:00Z")
 
     def test_holdings_performance_uses_only_last_ten_from_current_session(self):
         logs = self.root / "logs"

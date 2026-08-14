@@ -13,7 +13,8 @@ const elements = Object.fromEntries(
     "account-id", "server-id", "script-card", "script-status", "script-pid",
     "script-started", "script-duration", "script-message", "script-start", "script-stop",
     "emulator-card", "emulator-status", "emulator-avd", "emulator-device",
-    "emulator-availability", "emulator-message", "emulator-start", "emulator-stop",
+    "emulator-availability", "emulator-started", "emulator-duration",
+    "emulator-message", "emulator-start", "emulator-stop",
     "holdings-query-message", "holdings-query-count", "holdings-query-average",
     "holdings-query-fastest", "holdings-query-slowest",
     "health-overall", "health-summary", "health-machine-cpu-value", "health-machine-cpu-detail",
@@ -158,6 +159,8 @@ function renderStatus(payload) {
   elements["emulator-avd"].textContent = emulator.avd || "Not configured";
   elements["emulator-device"].textContent = emulator.device || "Not configured";
   elements["emulator-availability"].textContent = statusLabel(emulator.state);
+  elements["emulator-started"].textContent = emulator.running ? localDateTime(emulator.started_at) : "—";
+  elements["emulator-duration"].textContent = emulator.running ? durationText(emulator.duration_seconds) : "Not running";
   elements["emulator-message"].textContent = emulator.message || "Emulator status unavailable.";
 
   renderHoldingsQueries(payload.holdings_queries || {
@@ -185,6 +188,11 @@ function tick() {
   if (script?.running && script.started_at) {
     const seconds = Math.max(0, Math.floor((now.getTime() - new Date(script.started_at).getTime()) / 1000));
     elements["script-duration"].textContent = durationText(seconds);
+  }
+  const emulator = state.status.emulator;
+  if (emulator?.running && emulator.started_at) {
+    const seconds = Math.max(0, Math.floor((now.getTime() - new Date(emulator.started_at).getTime()) / 1000));
+    elements["emulator-duration"].textContent = durationText(seconds);
   }
   elements["next-check"].textContent = countdownText(state.status.next_check_at);
 }

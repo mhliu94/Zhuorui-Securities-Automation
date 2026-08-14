@@ -21,6 +21,7 @@ It shows:
 - its PID, start time, and live run duration;
 - the current listener session's last 10 completed holdings-query timings, including average, fastest, and slowest;
 - the configured Android virtual device and ADB connection state;
+- the emulator start time and live run duration;
 - five emulator-stress signals with a Healthy, Under load, or Restart recommended level: machine CPU, machine memory, Android memory pressure, ADB health, and Android response time;
 - controls to start or stop the listener and emulator.
 
@@ -67,13 +68,16 @@ The dashboard reuses `zhuorui_config.json`. These fields control the emulator in
   "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
   "avd": "Pixel_10_2",
+  "emulator_accel": "on",
   "public_host": "dashboard.example.com"
 }
 ```
 
-`emulator` may optionally be set to the full path of `emulator.exe`. When omitted, the dashboard derives it from the configured ADB path.
+`emulator` may optionally be set to the full path of `emulator.exe`. When omitted, the dashboard derives it from the configured ADB path. `emulator_accel` accepts `auto`, `on`, or `off`; `on` requires an available hardware accelerator and refuses to fall back to software emulation. On Windows, the emulator uses WHPX when it is the installed accelerator.
 
 For normal operation, start the emulator first and wait for **Running**, then start the listener. Stopping the emulator while the listener is running will interrupt Android automation.
+
+While the dashboard is running, it checks every 30 seconds for a scheduled restart window from 8:01 PM through 9:00 PM America/New_York time. If the last automatic or Web UI emulator start attempt was more than one hour ago, it stops the listener, stops the emulator, waits one minute, starts the emulator, waits two minutes, and makes up to five attempts to foreground Zhuorui before restarting the listener. A failed foreground check stops the emulator again. The restart-attempt time is persisted even when the restart fails.
 
 ## Direct server options
 

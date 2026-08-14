@@ -33,6 +33,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = PROJECT_ROOT / "monitor_web"
 PID_PATTERN = re.compile(r"^[0-9]+$")
 DEFAULT_INTERVAL_SECONDS = 60
+RESTART_CHECK_INTERVAL_SECONDS = 30
+RESTART_MIN_INTERVAL_SECONDS = 60 * 60
+RESTART_WINDOW_START_MINUTE = 20 * 60 + 1
+RESTART_WINDOW_END_MINUTE = 21 * 60
+EMULATOR_STOP_SETTLE_SECONDS = 60
+EMULATOR_BOOT_SETTLE_SECONDS = 2 * 60
+ZHUORUI_FOREGROUND_MAX_TRIES = 5
+ZHUORUI_FOREGROUND_RETRY_SECONDS = 5
+DEFAULT_ANDROID_PACKAGE = "com.zhuorui.securities"
+DEFAULT_ANDROID_ACTIVITY = ".ui.SplashActivity"
 MAX_REQUEST_BYTES = 4096
 ADMIN_USERNAME = "admin"
 PASSWORD_ITERATIONS = 600_000
@@ -68,6 +78,40 @@ def parse_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).astimezone(timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+def _month_weekday(year: int, month: int, weekday: int, occurrence: int) -> int:
+    first_weekday = datetime(year, month, 1).weekday()
+    return 1 + (weekday - first_weekday) % 7 + (occurrence - 1) * 7
+
+
+def eastern_time(value: datetime) -> datetime:
+    """Convert an aware time to US Eastern time without an external tzdata package."""
+    utc_value = value.astimezone(timezone.utc)
+    year = utc_value.year
+    daylight_start = datetime(
+        year,
+        3,
+        _month_weekday(year, 3, 6, 2),
+        7,
+        tzinfo=timezone.utc,
+    )
+    daylight_end = datetime(
+        year,
+        11,
+        _month_weekday(year, 11, 6, 1),
+        6,
+        tzinfo=timezone.utc,
+    )
+    is_daylight = daylight_start <= utc_value < daylight_end
+    offset = timedelta(hours=-4 if is_daylight else -5)
+    return utc_value.astimezone(timezone(offset, "EDT" if is_daylight else "EST"))
+
+
+def in_scheduled_restart_window(value: datetime) -> bool:
+    local = eastern_time(value)
+    local_minute = local.hour * 60 + local.minute
+    return RESTART_WINDOW_START_MINUTE <= local_minute <= RESTART_WINDOW_END_MINUTE
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -388,6 +432,34 @@ class ZhuoruiController:
         self._app_pss_history: deque[int] = deque(maxlen=5)
         self._last_health_history_at = 0.0
 
+    def _last_emulator_restart(self) -> datetime | None:
+        return parse_datetime(read_json(self.emulator_run_path).get("last_restart_utc"))
+
+    def _record_restart_started(self, source: str, started_at: datetime) -> None:
+        metadata = read_json(self.emulator_run_path)
+        metadata.update(
+            {
+                "last_restart_utc": iso_utc(started_at),
+                "last_restart_source": source,
+                "last_restart_state": "in_progress",
+                "last_restart_completed_utc": None,
+                "last_restart_message": None,
+            }
+        )
+        write_json(self.emulator_run_path, metadata)
+
+    def _record_restart_finished(self, result: ActionResult) -> ActionResult:
+        metadata = read_json(self.emulator_run_path)
+        metadata.update(
+            {
+                "last_restart_state": "succeeded" if result.ok else "failed",
+                "last_restart_completed_utc": iso_utc(utc_now()),
+                "last_restart_message": result.message,
+            }
+        )
+        write_json(self.emulator_run_path, metadata)
+        return result
+
     def public_config(self) -> dict[str, Any]:
         config = read_json(self.config_path)
         return {
@@ -598,12 +670,14 @@ class ZhuoruiController:
         public = self.public_config()
         adb_path = self._adb_path(config)
         tracked, tracked_pid, tracked_start = self._emulator_tracking()
+        last_restart = self._last_emulator_restart()
         base = {
             "device": public["device"],
             "avd": public["avd"],
             "pid": tracked_pid,
             "started_at": iso_utc(tracked_start) if tracked_start else None,
             "duration_seconds": max(0, int((now - tracked_start).total_seconds())) if tracked_start else None,
+            "last_restart_at": iso_utc(last_restart) if last_restart else None,
             "adb_state": "unavailable",
             "adb_latency_ms": None,
             "shell_latency_ms": None,
@@ -960,7 +1034,7 @@ class ZhuoruiController:
             return ActionResult(True, "The Zhuorui listener is not running.")
         return self._powershell_script("stop_zhuorui_listener.ps1", timeout=30)
 
-    def start_emulator(self) -> ActionResult:
+    def _start_emulator(self) -> ActionResult:
         config = self._config()
         public = self.public_config()
         current = self.emulator_status()
@@ -973,6 +1047,12 @@ class ZhuoruiController:
             return ActionResult(False, "emulator.exe was not found. Check the Android SDK installation.")
         if not avd:
             return ActionResult(False, "No AVD is configured. Add avd to zhuorui_config.json.")
+        emulator_accel = str(config.get("emulator_accel") or "auto").strip().lower()
+        if emulator_accel not in {"auto", "on", "off"}:
+            return ActionResult(
+                False,
+                "Config value emulator_accel must be auto, on, or off.",
+            )
 
         log_dir = self.root / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -984,7 +1064,7 @@ class ZhuoruiController:
         try:
             with log_path.open("ab") as log_file:
                 process = subprocess.Popen(
-                    [str(emulator_path), "-avd", avd],
+                    [str(emulator_path), "-avd", avd, "-accel", emulator_accel],
                     cwd=str(self.root),
                     stdin=subprocess.DEVNULL,
                     stdout=log_file,
@@ -995,6 +1075,18 @@ class ZhuoruiController:
         except OSError as exc:
             return ActionResult(False, f"Could not start the Android emulator: {exc}")
 
+        prior_metadata = read_json(self.emulator_run_path)
+        restart_metadata = {
+            name: prior_metadata[name]
+            for name in (
+                "last_restart_utc",
+                "last_restart_source",
+                "last_restart_state",
+                "last_restart_completed_utc",
+                "last_restart_message",
+            )
+            if name in prior_metadata
+        }
         write_json(
             self.emulator_run_path,
             {
@@ -1002,10 +1094,22 @@ class ZhuoruiController:
                 "started_utc": iso_utc(started_at),
                 "avd": avd,
                 "device": public["device"],
+                "acceleration": emulator_accel,
                 "log": str(log_path),
+                **restart_metadata,
             },
         )
         return ActionResult(True, f"Started Android emulator {avd}. It may take a minute to become ready.")
+
+    def start_emulator(self, *, restart_source: str | None = None) -> ActionResult:
+        if not restart_source:
+            return self._start_emulator()
+
+        current = self.emulator_status()
+        if current["running"]:
+            return ActionResult(True, "The Android emulator is already running or starting.")
+        self._record_restart_started(restart_source, utc_now())
+        return self._record_restart_finished(self._start_emulator())
 
     def stop_emulator(self) -> ActionResult:
         config = self._config()
@@ -1045,11 +1149,141 @@ class ZhuoruiController:
             return ActionResult(False, f"ADB could not stop the emulator: {adb_error}")
         return ActionResult(True, "The Android emulator is not running.")
 
+    @staticmethod
+    def _foreground_package(output: str) -> str | None:
+        for pattern in (
+            r"mCurrentFocus=.*?\s([A-Za-z0-9_.]+)/",
+            r"mFocusedApp=.*?\s([A-Za-z0-9_.]+)/",
+        ):
+            match = re.search(pattern, output)
+            if match:
+                return match.group(1)
+        return None
+
+    def _foreground_zhuorui(self, waiter: Callable[[float], bool]) -> ActionResult:
+        config = self._config()
+        adb_path = self._adb_path(config)
+        if not adb_path:
+            return ActionResult(False, "ADB was not found; Zhuorui could not be brought to the foreground.")
+
+        device = self.public_config()["device"]
+        package_name = str(config.get("android_package") or DEFAULT_ANDROID_PACKAGE).strip()
+        activity = str(config.get("android_activity") or DEFAULT_ANDROID_ACTIVITY).strip()
+        component = activity if "/" in activity else f"{package_name}/{activity}"
+        last_detail = "Android did not report a foreground application."
+        for attempt in range(1, ZHUORUI_FOREGROUND_MAX_TRIES + 1):
+            try:
+                launch = self.runner(
+                    [str(adb_path), "-s", device, "shell", "am", "start", "-n", component],
+                    cwd=self.root,
+                    timeout=10,
+                )
+                if launch.returncode != 0:
+                    last_detail = command_message(launch)
+                if waiter(ZHUORUI_FOREGROUND_RETRY_SECONDS):
+                    return ActionResult(False, "The restart was cancelled while waiting for Zhuorui.")
+                if launch.returncode == 0:
+                    foreground = self.runner(
+                        [str(adb_path), "-s", device, "shell", "dumpsys", "window"],
+                        cwd=self.root,
+                        timeout=10,
+                    )
+                    foreground_package = self._foreground_package(foreground.stdout or "")
+                    if foreground.returncode == 0 and foreground_package == package_name:
+                        return ActionResult(True, f"Zhuorui reached the foreground on try {attempt}.")
+                    last_detail = f"Foreground application: {foreground_package or 'unknown'}."
+            except (OSError, subprocess.SubprocessError) as exc:
+                last_detail = str(exc)
+
+        return ActionResult(
+            False,
+            f"Zhuorui did not reach the foreground after {ZHUORUI_FOREGROUND_MAX_TRIES} tries. {last_detail}",
+        )
+
+    def _restart_system_locked(
+        self,
+        *,
+        source: str,
+        started_at: datetime,
+        waiter: Callable[[float], bool],
+    ) -> ActionResult:
+        self._record_restart_started(source, started_at)
+
+        listener_stop = self.stop_script()
+        if not listener_stop.ok:
+            return self._record_restart_finished(
+                ActionResult(False, f"Restart failed while stopping the listener: {listener_stop.message}")
+            )
+
+        emulator_stop = self.stop_emulator()
+        if not emulator_stop.ok:
+            return self._record_restart_finished(
+                ActionResult(False, f"Restart failed while stopping the emulator: {emulator_stop.message}")
+            )
+        if waiter(EMULATOR_STOP_SETTLE_SECONDS):
+            return self._record_restart_finished(ActionResult(False, "The restart was cancelled before emulator start."))
+
+        emulator_start = self._start_emulator()
+        if not emulator_start.ok:
+            return self._record_restart_finished(
+                ActionResult(False, f"Restart failed while starting the emulator: {emulator_start.message}")
+            )
+        if waiter(EMULATOR_BOOT_SETTLE_SECONDS):
+            return self._record_restart_finished(
+                ActionResult(False, "The restart was cancelled while waiting for the emulator to boot.")
+            )
+
+        foreground = self._foreground_zhuorui(waiter)
+        if not foreground.ok:
+            final_stop = self.stop_emulator()
+            stop_detail = "" if final_stop.ok else f" Final emulator stop also failed: {final_stop.message}"
+            return self._record_restart_finished(ActionResult(False, foreground.message + stop_detail))
+
+        listener_start = self.start_script()
+        if not listener_start.ok:
+            return self._record_restart_finished(
+                ActionResult(False, f"Zhuorui was foregrounded, but the listener could not start: {listener_start.message}")
+            )
+        return self._record_restart_finished(
+            ActionResult(True, "The emulator, Zhuorui application, and listener restarted successfully.")
+        )
+
+    def scheduled_restart_if_due(
+        self,
+        now: datetime | None = None,
+        *,
+        waiter: Callable[[float], bool] | None = None,
+    ) -> ActionResult | None:
+        checked_at = now or utc_now()
+        if not in_scheduled_restart_window(checked_at):
+            return None
+        last_restart = self._last_emulator_restart()
+        if last_restart and (checked_at - last_restart).total_seconds() <= RESTART_MIN_INTERVAL_SECONDS:
+            return None
+        if not self._action_lock.acquire(blocking=False):
+            return None
+        try:
+            last_restart = self._last_emulator_restart()
+            if last_restart and (checked_at - last_restart).total_seconds() <= RESTART_MIN_INTERVAL_SECONDS:
+                return None
+            effective_waiter = waiter
+            if effective_waiter is None:
+                def effective_waiter(seconds: float) -> bool:
+                    time.sleep(seconds)
+                    return False
+            return self._restart_system_locked(
+                source="scheduled",
+                started_at=checked_at,
+                waiter=effective_waiter,
+            )
+        finally:
+            self._action_lock.release()
+
     def perform(self, action: str) -> ActionResult:
         actions = {
             "script/start": self.start_script,
             "script/stop": self.stop_script,
-            "emulator/start": self.start_emulator,
+            "emulator/start": lambda: self.start_emulator(restart_source="web_ui"),
             "emulator/stop": self.stop_emulator,
         }
         handler = actions.get(action)
@@ -1072,6 +1306,7 @@ class StatusMonitor:
         self._refresh_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._restart_thread: threading.Thread | None = None
 
     def refresh(self) -> dict[str, Any]:
         with self._refresh_lock:
@@ -1100,16 +1335,37 @@ class StatusMonitor:
         while not self._stop_event.wait(self.interval_seconds):
             self.refresh()
 
+    def _run_restart_scheduler(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                result = self.controller.scheduled_restart_if_due(waiter=self._stop_event.wait)
+                if result:
+                    stream = sys.stdout if result.ok else sys.stderr
+                    print(f"Scheduled restart: {result.message}", file=stream, flush=True)
+                    self.refresh()
+            except Exception as exc:  # Keep time checks alive after an unexpected control failure.
+                print(f"Scheduled restart check failed: {exc}", file=sys.stderr, flush=True)
+            if self._stop_event.wait(RESTART_CHECK_INTERVAL_SECONDS):
+                break
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._thread = threading.Thread(target=self._run, name="zhuorui-status-monitor", daemon=True)
         self._thread.start()
+        self._restart_thread = threading.Thread(
+            target=self._run_restart_scheduler,
+            name="zhuorui-restart-scheduler",
+            daemon=True,
+        )
+        self._restart_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+        if self._restart_thread:
+            self._restart_thread.join(timeout=5)
 
 
 class SessionStore:
