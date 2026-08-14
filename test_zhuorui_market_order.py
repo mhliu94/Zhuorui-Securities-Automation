@@ -16,6 +16,7 @@ from zhuorui_market_order import (
     EMPTY_POSITIONS_LABEL,
     LOGIN_DELAY_SECONDS,
     ORDER_RESTART_SETTLE_SECONDS,
+    POSITION_TABLE_EXPAND_SETTLE_SECONDS,
     Bounds,
     LightRegionStats,
     TradingCommand,
@@ -217,6 +218,55 @@ class EmptyPositionsTests(unittest.TestCase):
         trader = ZhuoruiTrader(FakeAdb([node("No orders yet")]))
 
         self.assertFalse(trader.empty_positions_visible([node("No orders yet")]))
+
+    def test_fast_collector_expands_collapsed_positions_before_final_extraction(self) -> None:
+        banner = node(
+            resource_id="com.zhuorui.securities:id/stickyTitleBar",
+            bounds=Bounds(0, 391, 1080, 505),
+            clickable=True,
+        )
+        collapsed_nodes = [banner]
+        expanded_nodes = [
+            banner,
+            node(resource_id="com.zhuorui.securities:id/expandableLayout"),
+            node(EMPTY_POSITIONS_LABEL),
+        ]
+
+        class SequenceAdb(FakeAdb):
+            def __init__(self) -> None:
+                super().__init__(collapsed_nodes)
+                self.responses = [collapsed_nodes, expanded_nodes]
+                self.dump_count = 0
+
+            def dump_xml(self) -> list[UiNode]:
+                self.dump_count += 1
+                return self.responses.pop(0)
+
+        adb = SequenceAdb()
+        trader = ZhuoruiTrader(adb)
+
+        with patch("zhuorui_market_order.time.sleep") as sleep:
+            self.assertEqual(trader.collect_visible_security_positions_once(), [])
+
+        self.assertEqual(adb.taps, [banner.bounds.center])
+        self.assertEqual(adb.dump_count, 2)
+        sleep.assert_called_once_with(POSITION_TABLE_EXPAND_SETTLE_SECONDS)
+
+    def test_fast_collector_does_not_tap_when_positions_table_is_expanded(self) -> None:
+        expanded_nodes = [
+            node(
+                resource_id="com.zhuorui.securities:id/stickyTitleBar",
+                bounds=Bounds(0, 391, 1080, 505),
+                clickable=True,
+            ),
+            node(resource_id="com.zhuorui.securities:id/expandableLayout"),
+            node(EMPTY_POSITIONS_LABEL),
+        ]
+        adb = FakeAdb(expanded_nodes)
+        trader = ZhuoruiTrader(adb)
+
+        self.assertEqual(trader.collect_visible_security_positions_once(), [])
+        self.assertEqual(adb.taps, [])
 
 
 class AdScreenDetectionTests(unittest.TestCase):

@@ -115,6 +115,7 @@ HOME_SCREEN_REQUIRED_LABELS = ("Quotes", "Assets", "S-Invest", "Wealth", "News")
 HOME_SCREEN_LABEL_SCORE_THRESHOLD = 0.48
 EMPTY_POSITIONS_LABEL = "No positions yet"
 POSITION_TABLE_MAX_SCROLLS = 8
+POSITION_TABLE_EXPAND_SETTLE_SECONDS = 0.5
 POSITION_LANDING_BACK_TAPS = 5
 POSITION_LANDING_BACK_DELAY = 0.45
 ORDER_WATCHLIST_BACK_TAPS = 5
@@ -1903,6 +1904,7 @@ class ZhuoruiTrader:
 
     def collect_visible_security_positions_once(self) -> list[dict[str, str]]:
         nodes = self.current_nodes()
+        nodes = self.expand_positions_table_if_collapsed(nodes)
         if self.empty_positions_visible(nodes):
             return []
 
@@ -1919,6 +1921,15 @@ class ZhuoruiTrader:
             visible = [node.text for node in nodes if node.text]
             raise ZhuoruiAutomationError(f"Positions table rows were not found. Visible text: {visible[:16]}")
         return securities
+
+    def expand_positions_table_if_collapsed(self, nodes: list[UiNode]) -> list[UiNode]:
+        banner = first_by_id(nodes, ":id/stickyTitleBar") or first_by_id(nodes, ":id/titleBar")
+        if banner is None or first_by_id(nodes, ":id/expandableLayout"):
+            return nodes
+
+        self.adb.tap(*banner.bounds.center)
+        time.sleep(POSITION_TABLE_EXPAND_SETTLE_SECONDS)
+        return self.current_nodes()
 
     def tap_net_assets_tile_fast(self) -> None:
         self.adb.tap(*FAST_NET_ASSETS_TILE_MIDDLE_LEFT)
