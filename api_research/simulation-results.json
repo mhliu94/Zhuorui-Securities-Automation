@@ -1,0 +1,132 @@
+{
+  "mode": "offline_simulation",
+  "live_trades": 0,
+  "tests_passed": 43,
+  "scenarios": [
+    {
+      "scenario": "market_multilevel",
+      "synthetic": true,
+      "initial_cash": "1000",
+      "requested_quantity": 3,
+      "status": "filled",
+      "filled_quantity": 3,
+      "remaining_quantity": 0,
+      "holdings": {
+        "cash": [
+          {
+            "currency": "USD",
+            "amount": "968"
+          }
+        ],
+        "securities": [
+          {
+            "symbol": "TEST",
+            "quantity": "3",
+            "average_cost": "10.66666666666666666666666667"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "limit_partial",
+      "synthetic": true,
+      "initial_cash": "1000",
+      "requested_quantity": 3,
+      "status": "partially_filled",
+      "filled_quantity": 2,
+      "remaining_quantity": 1,
+      "holdings": {
+        "cash": [
+          {
+            "currency": "USD",
+            "amount": "980"
+          }
+        ],
+        "securities": [
+          {
+            "symbol": "TEST",
+            "quantity": "2",
+            "average_cost": "10"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "native_fok_insufficient",
+      "synthetic": true,
+      "initial_cash": "1000",
+      "requested_quantity": 3,
+      "status": "cancelled",
+      "filled_quantity": 0,
+      "remaining_quantity": 3,
+      "holdings": {
+        "cash": [
+          {
+            "currency": "USD",
+            "amount": "1000"
+          }
+        ],
+        "securities": []
+      }
+    },
+    {
+      "scenario": "native_fok_full",
+      "synthetic": true,
+      "initial_cash": "1000",
+      "requested_quantity": 3,
+      "status": "filled",
+      "filled_quantity": 3,
+      "remaining_quantity": 0,
+      "holdings": {
+        "cash": [
+          {
+            "currency": "USD",
+            "amount": "969.00"
+          }
+        ],
+        "securities": [
+          {
+            "symbol": "TEST",
+            "quantity": "3",
+            "average_cost": "10.33333333333333333333333333"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "submit_then_cancel_partial",
+      "synthetic": true,
+      "initial_cash": "1000",
+      "requested_quantity": 3,
+      "status": "cancelled",
+      "filled_quantity": 2,
+      "remaining_quantity": 1,
+      "holdings": {
+        "cash": [
+          {
+            "currency": "USD",
+            "amount": "980"
+          }
+        ],
+        "securities": [
+          {
+            "symbol": "TEST",
+            "quantity": "2",
+            "average_cost": "10"
+          }
+        ]
+      }
+    }
+  ],
+  "authenticated_holdings_capture_available": false,
+  "broker_wire_enums_verified": false,
+  "last_test_date_utc": "2026-09-09",
+  "requested_api_market_behavior": "native_market",
+  "requested_api_fok_replacement": "limit_with_one_second_cancel_target",
+  "timed_cancel_tests_passed": 9,
+  "decimal_signing_tests_passed": 5,
+  "external_capture_evidence": [
+    "account-read-evidence.json",
+    "limit-auth-capture-evidence.json"
+  ]
+}

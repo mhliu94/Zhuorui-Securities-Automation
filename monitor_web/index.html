@@ -33,7 +33,7 @@
           <div>
             <p class="eyebrow">SYSTEM OVERVIEW</p>
             <h1 id="page-title">Trading operations,<br><em>at a glance.</em></h1>
-            <p class="hero-copy">Monitor the listener and Android environment for this Zhuorui account. Status is checked on the server every 60 seconds.</p>
+            <p class="hero-copy" id="service-description">Control trading and account updates for this Zhuorui account.</p>
           </div>
           <div class="account-plate" aria-label="Current Zhuorui account">
             <p>ACTIVE ACCOUNT</p>
@@ -48,7 +48,7 @@
               <div>
                 <span class="card-number">01</span>
                 <p class="card-kicker">TRADING SERVICE</p>
-                <h2>Zhuorui Listener</h2>
+                <h2 id="script-title">Zhuorui Listener</h2>
               </div>
               <div class="status-pill is-loading" id="script-status">
                 <span aria-hidden="true"></span>
@@ -69,15 +69,26 @@
                 <dt>Run duration</dt>
                 <dd id="script-duration">—</dd>
               </div>
+              <div>
+                <dt>Order execution</dt>
+                <dd id="script-execution">—</dd>
+              </div>
+              <div>
+                <dt>Last holdings publish</dt>
+                <dd id="script-last-publish">—</dd>
+              </div>
             </dl>
 
             <p class="status-note" id="script-message">Waiting for the first status check.</p>
             <div class="card-actions">
               <button class="action-button primary" id="script-start" type="button" data-action="script/start" disabled>
-                <span aria-hidden="true">▶</span> Start listener
+                <span aria-hidden="true">▶</span> Start API
               </button>
-              <button class="action-button secondary danger" id="script-stop" type="button" data-action="script/stop" data-confirm="Stop the Zhuorui trading listener? New commands will not be processed until it is started again." disabled>
-                <span aria-hidden="true">■</span> Stop listener
+              <button class="action-button secondary" id="script-restart" type="button" data-action="script/restart" data-confirm="Restart the API listener? It will finish active work before stopping, then resume Kafka commands and holdings publishing." disabled>
+                <span aria-hidden="true">↻</span> Restart API
+              </button>
+              <button class="action-button secondary danger" id="script-stop" type="button" data-action="script/stop" data-confirm="Stop the API listener? It will finish active work before stopping. Kafka commands and holdings publishing resume when it starts again." disabled>
+                <span aria-hidden="true">■</span> Stop API
               </button>
             </div>
           </article>
@@ -86,8 +97,8 @@
             <div class="card-heading">
               <div>
                 <span class="card-number">02</span>
-                <p class="card-kicker">ANDROID ENVIRONMENT</p>
-                <h2>Trading Emulator</h2>
+                <p class="card-kicker">LOGIN SESSION SOURCE</p>
+                <h2>Android Emulator</h2>
               </div>
               <div class="status-pill is-loading" id="emulator-status">
                 <span aria-hidden="true"></span>
@@ -123,7 +134,7 @@
               <button class="action-button primary" id="emulator-start" type="button" data-action="emulator/start" disabled>
                 <span aria-hidden="true">▶</span> Start emulator
               </button>
-              <button class="action-button secondary danger" id="emulator-stop" type="button" data-action="emulator/stop" data-confirm="Stop the Android emulator? The trading listener may lose access to the Zhuorui app." disabled>
+              <button class="action-button secondary danger" id="emulator-stop" type="button" data-action="emulator/stop" data-confirm="Stop the Android emulator? API queries use the saved session; importing a new login session requires the emulator again." disabled>
                 <span aria-hidden="true">■</span> Stop emulator
               </button>
             </div>
@@ -133,7 +144,7 @@
         <section class="query-panel" aria-labelledby="query-title">
           <div class="query-heading">
             <div>
-              <p class="query-kicker">CURRENT LISTENER SESSION</p>
+              <p class="query-kicker" id="query-session-label">CURRENT LISTENER SESSION</p>
               <h2 id="query-title">Holdings query performance</h2>
               <p id="holdings-query-message">Waiting for completed holdings queries.</p>
             </div>
@@ -158,7 +169,7 @@
         <section class="health-panel" aria-labelledby="health-title">
           <div class="health-heading">
             <div>
-              <p class="health-kicker">EMULATOR STRESS</p>
+              <p class="health-kicker">WINDOWS AND SESSION SOURCE</p>
               <h2 id="health-title">Resource health</h2>
               <p id="health-summary">Waiting for the first five-signal health check.</p>
             </div>

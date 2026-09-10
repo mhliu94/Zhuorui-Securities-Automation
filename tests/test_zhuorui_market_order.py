@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from zhuorui_market_order import (
@@ -17,8 +18,11 @@ from zhuorui_market_order import (
     LOGIN_DELAY_SECONDS,
     ORDER_RESTART_SETTLE_SECONDS,
     POSITION_TABLE_EXPAND_SETTLE_SECONDS,
+    RETRY_ANR_DIALOG_TITLE,
+    RETRY_CLOSE_APP_SETTLE_SECONDS,
     Bounds,
     LightRegionStats,
+    RetryDialogTextOcr,
     TradingCommand,
     UiNode,
     ZhuoruiAutomationError,
@@ -26,6 +30,8 @@ from zhuorui_market_order import (
     classify_ad_screen,
     login_delay_seconds,
     main,
+    publish_holdings,
+    run_trading_server,
     submit_trading_command,
 )
 
@@ -661,6 +667,9 @@ class OrderRetryTests(unittest.TestCase):
         adb.shell.side_effect = lambda *args, **kwargs: events.append(("shell", args, kwargs))
         trader.launch = Mock(side_effect=lambda: events.append("launch"))
         trader.wait_for_order_retry_landing = Mock(side_effect=lambda: events.append("stable_landing"))
+        trader.close_anr_dialog_and_restart_on_retry = Mock(
+            side_effect=lambda: events.append("anr_check") or False
+        )
 
         with patch(
             "zhuorui_market_order.time.sleep",
@@ -668,8 +677,9 @@ class OrderRetryTests(unittest.TestCase):
         ):
             trader.restart_app_for_order_retry()
 
-        self.assertEqual(events[0][0:2], ("shell", ("am", "force-stop", PACKAGE)))
-        self.assertEqual(events[1:], [("sleep", ORDER_RESTART_SETTLE_SECONDS), "launch", "stable_landing"])
+        self.assertEqual(events[0], "anr_check")
+        self.assertEqual(events[1][0:2], ("shell", ("am", "force-stop", PACKAGE)))
+        self.assertEqual(events[2:], [("sleep", ORDER_RESTART_SETTLE_SECONDS), "launch", "stable_landing"])
         self.assertIsNone(trader.prepared_submit)
         self.assertIsNone(trader.prepared_order_type_name)
         self.assertIsNone(trader.prepared_limit_price)
@@ -755,6 +765,81 @@ class OrderRetryTests(unittest.TestCase):
         trader.dismiss_order_success_dialog.assert_called_once()
 
 
+class RetryAnrRecoveryTests(unittest.TestCase):
+    def test_screenshot_ocr_recognizes_anr_title_and_rejects_blank_screen(self) -> None:
+        from PIL import Image, ImageDraw, ImageFont
+
+        with TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            font_path = Path("C:/Windows/Fonts/arial.ttf")
+            if not font_path.exists():
+                self.skipTest("Windows Arial font is unavailable")
+            font = ImageFont.truetype(str(font_path), 56)
+            anr_path = temp_dir / "anr.png"
+            blank_path = temp_dir / "blank.png"
+            image = Image.new("RGB", (1080, 2424), (45, 45, 45))
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle((70, 1020, 1010, 1465), radius=80, fill=(247, 247, 255))
+            draw.text((132, 1090), RETRY_ANR_DIALOG_TITLE, font=font, fill=(48, 48, 58))
+            image.save(anr_path)
+            Image.new("RGB", (1080, 2424), "black").save(blank_path)
+
+            ocr = RetryDialogTextOcr(font_path)
+
+            self.assertEqual(ocr.recognize_retry_dialog_text(anr_path), RETRY_ANR_DIALOG_TITLE)
+            self.assertEqual(ocr.recognize_retry_dialog_text(blank_path), "")
+
+    def test_retry_anr_check_closes_app_then_restarts(self) -> None:
+        events: list[object] = []
+        adb = Mock()
+        adb.wm_size.return_value = (1080, 2424)
+        adb.screenshot.side_effect = lambda _path: events.append("screenshot")
+        adb.tap.side_effect = lambda *point: events.append(("tap", point))
+        trader = ZhuoruiTrader(adb)
+        trader.launch = Mock(side_effect=lambda: events.append("launch"))
+        trader.wait_for_order_retry_landing = Mock(side_effect=lambda: events.append("stable_landing"))
+        ocr = Mock()
+        ocr.recognize_retry_dialog_text.return_value = RETRY_ANR_DIALOG_TITLE
+
+        with (
+            patch("zhuorui_market_order.RetryDialogTextOcr.from_adb", return_value=ocr),
+            patch(
+                "zhuorui_market_order.time.sleep",
+                side_effect=lambda seconds: events.append(("sleep", seconds)),
+            ),
+        ):
+            recovered = trader.close_anr_dialog_and_restart_on_retry()
+
+        self.assertTrue(recovered)
+        self.assertEqual(
+            events,
+            [
+                "screenshot",
+                ("tap", (378, 1256)),
+                ("sleep", RETRY_CLOSE_APP_SETTLE_SECONDS),
+                "launch",
+                "stable_landing",
+            ],
+        )
+
+    def test_retry_anr_check_does_not_tap_or_restart_without_dialog(self) -> None:
+        adb = Mock()
+        trader = ZhuoruiTrader(adb)
+        trader.launch = Mock()
+        trader.wait_for_order_retry_landing = Mock()
+        ocr = Mock()
+        ocr.recognize_retry_dialog_text.return_value = ""
+
+        with patch("zhuorui_market_order.RetryDialogTextOcr.from_adb", return_value=ocr):
+            recovered = trader.close_anr_dialog_and_restart_on_retry()
+
+        self.assertFalse(recovered)
+        adb.screenshot.assert_called_once()
+        adb.tap.assert_not_called()
+        trader.launch.assert_not_called()
+        trader.wait_for_order_retry_landing.assert_not_called()
+
+
 class CliOrderRetryRoutingTests(unittest.TestCase):
     def test_all_live_cli_order_types_use_shared_retry_wrapper(self) -> None:
         cases = [
@@ -830,6 +915,85 @@ class CliOrderRetryRoutingTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         trader.prepare_order.assert_called_once()
         submit.assert_not_called()
+
+
+class HoldingsRetryTests(unittest.TestCase):
+    def test_retry_flag_runs_anr_check_before_holdings_query(self) -> None:
+        events: list[str] = []
+        trader = Mock()
+        trader.prepare_for_retry.side_effect = lambda: events.append("retry_check")
+        trader.ensure_app_foreground.side_effect = lambda **_kwargs: events.append("foreground")
+        trader.collect_positions.side_effect = lambda: events.append("collect") or {
+            "cash": [],
+            "securities": [],
+        }
+        producer = Mock()
+        kafka_config = Mock()
+
+        with patch(
+            "zhuorui_market_order.ktrader_account_snapshot",
+            return_value={"account_id": "test-account"},
+        ):
+            publish_holdings(
+                producer,
+                "holdings",
+                kafka_config,
+                {},
+                trader,
+                retry=True,
+            )
+
+        self.assertEqual(events, ["retry_check", "foreground", "collect"])
+
+    def test_first_holdings_query_skips_retry_anr_check(self) -> None:
+        trader = Mock()
+        trader.collect_positions.return_value = {"cash": [], "securities": []}
+        producer = Mock()
+
+        with patch(
+            "zhuorui_market_order.ktrader_account_snapshot",
+            return_value={"account_id": "test-account"},
+        ):
+            publish_holdings(producer, "holdings", Mock(), {}, trader)
+
+        trader.prepare_for_retry.assert_not_called()
+
+    def test_server_marks_query_after_failure_as_retry(self) -> None:
+        producer = Mock()
+        consumer = Mock()
+        consumer.poll.return_value = {}
+        kafka_module = SimpleNamespace(
+            KafkaProducer=Mock(return_value=producer),
+            KafkaConsumer=Mock(return_value=consumer),
+        )
+        kafka_config = SimpleNamespace(
+            bootstrap_servers=["test:9092"],
+            client_id="test-client",
+            command_topic="commands",
+            group_id="test-group",
+            auto_offset_reset="latest",
+            server_id="test-server",
+            holdings_topic="holdings",
+            holdings_interval_seconds=120.0,
+            poll_seconds=1.0,
+        )
+        runtime = SimpleNamespace(config={}, trader=Mock(), trade_password=None)
+
+        with (
+            patch.dict("sys.modules", {"kafka": kafka_module}),
+            patch("zhuorui_market_order.load_kafka_config", return_value=kafka_config),
+            patch("zhuorui_market_order.account_snapshot_config"),
+            patch("zhuorui_market_order.publish_status"),
+            patch(
+                "zhuorui_market_order.publish_holdings",
+                side_effect=[ZhuoruiAutomationError("first failure"), KeyboardInterrupt],
+            ) as publish,
+            patch("zhuorui_market_order.time.monotonic", side_effect=[0.0, 120.0]),
+        ):
+            self.assertEqual(run_trading_server(Mock(), runtime), 0)
+
+        self.assertFalse(publish.call_args_list[0].kwargs["retry"])
+        self.assertTrue(publish.call_args_list[1].kwargs["retry"])
 
 
 class HoldingsDumpTimeoutTests(unittest.TestCase):

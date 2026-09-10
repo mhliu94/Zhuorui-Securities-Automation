@@ -1,0 +1,85 @@
+{
+  "date_utc": "2026-09-09T02:40:14.298160+00:00",
+  "device": "emulator-5554",
+  "avd": "Pixel_10_2",
+  "backup_verified": true,
+  "fingerprint_preserved": true,
+  "android_id_preserved": true,
+  "temporary_debug_ramdisk": true,
+  "installed_system_image_modified": false,
+  "selinux_enforcing": true,
+  "adb_authentication_enabled": true,
+  "session_refresh_observed": true,
+  "account_flows": [
+    {
+      "path": "/as_trade/api/auth/v1/current_auth_info",
+      "status": 200,
+      "code": "000000",
+      "request_fields": [
+        "timeStamp",
+        "sign"
+      ],
+      "response_fields": [
+        "code",
+        "msg"
+      ],
+      "data_fields": []
+    },
+    {
+      "path": "/as_user/api/user_account/v1/refresh_token",
+      "status": 200,
+      "code": "000000",
+      "request_fields": [
+        "timeStamp",
+        "sign"
+      ],
+      "response_fields": [
+        "code",
+        "msg",
+        "data"
+      ],
+      "data_fields": []
+    },
+    {
+      "path": "/as_trade/api/account/v1/info",
+      "status": 200,
+      "code": "000000",
+      "request_fields": [
+        "timeStamp",
+        "sign"
+      ],
+      "response_fields": [
+        "code",
+        "msg",
+        "data"
+      ],
+      "data_fields": [
+        "clientId",
+        "fundAccount",
+        "accType",
+        "renewalTime",
+        "pcRenewalTime",
+        "forceChangePwd",
+        "mainland",
+        "hkOpenFund",
+        "usOpenFund",
+        "emailOption",
+        "tradePlat",
+        "clientAccountStatus",
+        "usStockBroker",
+        "tradePermissions"
+      ]
+    }
+  ],
+  "holdings_verified": true,
+  "orders_verified": false,
+  "cash_verified": true,
+  "direct_account_read_evidence": "account-read-evidence.json",
+  "today_orders_capture_verified": true,
+  "historical_orders_capture_verified": true,
+  "limit_submission_capture_verified": true,
+  "limit_rejection_reconciled": true,
+  "trading_unlock_capture_verified": true,
+  "incorrect_trading_password_capture_verified": true,
+  "order_flow_evidence": "limit-auth-capture-evidence.json"
+}

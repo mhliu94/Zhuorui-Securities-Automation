@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from zhuorui_monitor import (
     ActionResult,
@@ -90,10 +91,10 @@ class ZhuoruiControllerTests(unittest.TestCase):
 
     def test_running_script_reports_pid_start_and_duration(self):
         started = datetime.now(timezone.utc) - timedelta(hours=2, minutes=3)
-        (self.root / "zhuorui_listener.pid").write_text("4321", encoding="ascii")
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
         self.write_json(
-            "zhuorui_listener.current.json",
-            {"pid": 4321, "started_utc": started.isoformat()},
+            "zhuorui_api_listener.current.json",
+            {"pid": 4321, "backend": "api", "started_utc": started.isoformat()},
         )
         controller = ZhuoruiController(
             self.root,
@@ -109,7 +110,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
         self.assertIsNotNone(parse_datetime(status["started_at"]))
 
     def test_stale_pid_is_not_reported_as_running(self):
-        (self.root / "zhuorui_listener.pid").write_text("4321", encoding="ascii")
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
         controller = ZhuoruiController(
             self.root,
             probe=lambda pid: {"running": False, "started_epoch": None},
@@ -125,10 +126,10 @@ class ZhuoruiControllerTests(unittest.TestCase):
     def test_reused_pid_is_rejected_using_creation_time(self):
         recorded = datetime.now(timezone.utc) - timedelta(days=1)
         actual = datetime.now(timezone.utc)
-        (self.root / "zhuorui_listener.pid").write_text("4321", encoding="ascii")
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
         self.write_json(
-            "zhuorui_listener.current.json",
-            {"pid": 4321, "started_utc": recorded.isoformat()},
+            "zhuorui_api_listener.current.json",
+            {"pid": 4321, "backend": "api", "started_utc": recorded.isoformat()},
         )
         controller = ZhuoruiController(
             self.root,
@@ -156,6 +157,24 @@ class ZhuoruiControllerTests(unittest.TestCase):
         self.assertNotIn("trade_password", public)
         self.assertNotIn("login", public)
 
+    def test_configured_api_order_mode_observes_shared_account_switch(self):
+        controller = ZhuoruiController(self.root)
+        self.write_json("zhuorui_config.json", {})
+        self.assertTrue(controller.public_config()["live_orders_enabled"])
+        self.write_json("zhuorui_config.json", {"api": {"live_orders_enabled": False}})
+        self.assertFalse(controller.public_config()["live_orders_enabled"])
+        self.write_json("zhuorui_config.json", {
+            "api": {"live_orders_enabled": "true"}, "trading_enabled": True,
+            "account": {"trading_enabled": False},
+        })
+        controller = ZhuoruiController(self.root)
+        self.assertFalse(controller.public_config()["live_orders_enabled"])
+        self.write_json("zhuorui_config.json", {
+            "api": {"live_orders_enabled": "true"}, "trading_enabled": False,
+            "account": {"trading_enabled": "yes"},
+        })
+        self.assertTrue(controller.public_config()["live_orders_enabled"])
+
     def test_emulator_running_when_adb_device_is_booted(self):
         adb = self.make_adb()
         self.write_json(
@@ -180,7 +199,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
         )
         self.write_json(
             "zhuorui_emulator.current.json",
-            {"pid": 4321, "started_utc": started.isoformat()},
+            {"pid": 4321, "backend": "api", "started_utc": started.isoformat()},
         )
         controller = ZhuoruiController(
             self.root,
@@ -228,12 +247,125 @@ class ZhuoruiControllerTests(unittest.TestCase):
             self.root,
             runner=FakeRunner(),
             control_runner=control_runner,
+            backend="api" if os.name == "nt" else "ui",
         )
 
         result = controller.start_script()
 
         self.assertTrue(result.ok)
-        self.assertIn(f"start_zhuorui_listener{suffix}", control_runner.calls[0][-1])
+        self.assertIn(str(controller.root / f"start_zhuorui_listener{suffix}"), control_runner.calls[0])
+        if os.name == "nt":
+            self.assertEqual(control_runner.calls[0][-4:], ["-Backend", "api", "-ConfigPath", str(controller.config_path)])
+        else:
+            self.assertEqual(control_runner.calls[0][-2:], ["--config", str(controller.config_path)])
+
+    def test_api_monitor_ignores_legacy_ui_listener(self):
+        started = datetime.now(timezone.utc)
+        (self.root / "zhuorui_listener.pid").write_text("4321", encoding="ascii")
+        self.write_json("zhuorui_listener.current.json", {"pid": 4321, "started_utc": started.isoformat()})
+        controller = ZhuoruiController(self.root, probe=lambda pid: {"running": True, "started_epoch": started.timestamp()})
+        self.assertFalse(controller.script_status()["running"])
+
+    def test_linux_control_preserves_ui_launcher_and_config_argument(self):
+        (self.root / "start_zhuorui_listener.sh").write_text("", encoding="utf-8")
+        runner = FakeRunner()
+        controller = ZhuoruiController(self.root, backend="ui", control_runner=runner)
+        with patch("zhuorui_monitor.os", SimpleNamespace(name="posix")):
+            result = controller._control_script("start_zhuorui_listener")
+        self.assertTrue(result.ok)
+        self.assertEqual(runner.calls[0], ["bash", str(controller.root / "start_zhuorui_listener.sh"), "--config", str(controller.config_path)])
+
+    def test_linux_ui_order_mode_uses_shared_switch_without_api_override(self):
+        self.write_json("zhuorui_config.json", {"api": {"live_orders_enabled": False}, "trading_enabled": True})
+        self.assertTrue(ZhuoruiController(self.root, backend="ui").public_config()["live_orders_enabled"])
+
+    def test_api_monitor_requires_explicit_backend_metadata(self):
+        started = datetime.now(timezone.utc)
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
+        self.write_json("zhuorui_api_listener.current.json", {"pid": 4321, "started_utc": started.isoformat()})
+        controller = ZhuoruiController(self.root, probe=lambda pid: {"running": True, "started_epoch": started.timestamp()})
+        self.assertFalse(controller.script_status()["running"])
+
+    def test_api_restart_does_not_call_emulator_controls(self):
+        controller = ZhuoruiController(self.root)
+        events = []
+        controller.stop_script = Mock(side_effect=lambda: events.append("stop") or ActionResult(True, "stopped"))
+        controller.start_script = Mock(side_effect=lambda: events.append("start") or ActionResult(True, "started"))
+        controller.stop_emulator = Mock()
+        controller._start_emulator = Mock()
+        self.assertTrue(controller.perform("script/restart").ok)
+        self.assertEqual(events, ["stop", "start"])
+        controller.stop_emulator.assert_not_called()
+        controller._start_emulator.assert_not_called()
+
+    def test_api_restart_waits_for_successful_graceful_stop(self):
+        controller = ZhuoruiController(self.root)
+        controller.stop_script = Mock(return_value=ActionResult(False, "still draining"))
+        controller.start_script = Mock()
+        self.assertFalse(controller.perform("script/restart").ok)
+        controller.start_script.assert_not_called()
+
+    def test_api_scheduled_restart_does_not_touch_listener_or_emulator(self):
+        controller = ZhuoruiController(self.root)
+        controller._restart_system_locked = Mock()
+        self.assertIsNone(controller.scheduled_restart_if_due(datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)))
+        controller._restart_system_locked.assert_not_called()
+
+    def test_api_current_state_overrides_configured_live_mode_and_reports_publish(self):
+        started = datetime.now(timezone.utc) - timedelta(minutes=2)
+        now = datetime.now(timezone.utc)
+        state_path = self.root / "state.json"
+        self.write_json("state.json", {
+            "updated_at": now.isoformat(), "live_orders_enabled": False,
+            "session_status": "valid", "last_holdings_publish": now.isoformat(), "last_error": None,
+        })
+        self.write_json("zhuorui_api_listener.current.json", {
+            "pid": 4321, "backend": "api", "started_utc": started.isoformat(),
+            "state_file": str(state_path), "live_orders_enabled": True,
+        })
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
+        controller = ZhuoruiController(self.root, probe=lambda pid: {"running": True, "started_epoch": started.timestamp()})
+        status = controller.script_status(now)
+        self.assertTrue(status["running"])
+        self.assertFalse(status["live_orders_enabled"])
+        self.assertEqual(status["last_holdings_publish"], now.isoformat())
+        self.assertIn("published", status["message"])
+
+    def test_api_state_from_previous_run_is_not_shown_as_current(self):
+        now = datetime.now(timezone.utc)
+        self.write_json("state.json", {"updated_at": (now - timedelta(hours=1)).isoformat(), "last_holdings_publish": "old"})
+        self.write_json("zhuorui_api_listener.current.json", {
+            "pid": 4321, "backend": "api", "started_utc": now.isoformat(), "state_file": str(self.root / "state.json"),
+        })
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
+        controller = ZhuoruiController(self.root, probe=lambda pid: {"running": True, "started_epoch": now.timestamp()})
+        self.assertNotIn("last_holdings_publish", controller.script_status(now))
+
+    def test_api_heartbeat_does_not_hide_overdue_holdings_publication(self):
+        now = datetime.now(timezone.utc)
+        started = now - timedelta(minutes=5)
+        self.write_json("state.json", {
+            "updated_at": now.isoformat(), "last_holdings_publish": (now - timedelta(minutes=2)).isoformat(),
+            "holdings_interval_seconds": 30,
+        })
+        self.write_json("zhuorui_api_listener.current.json", {
+            "pid": 4321, "backend": "api", "started_utc": started.isoformat(), "state_file": str(self.root / "state.json"),
+        })
+        (self.root / "zhuorui_api_listener.pid").write_text("4321", encoding="ascii")
+        controller = ZhuoruiController(self.root, probe=lambda pid: {"running": True, "started_epoch": started.timestamp()})
+        status = controller.script_status(now)
+        self.assertTrue(status["running"])
+        self.assertEqual(status["state"], "attention")
+        self.assertIn("publication is overdue", status["message"])
+
+    def test_api_resource_health_does_not_require_running_emulator(self):
+        controller = ZhuoruiController(self.root, machine_sampler=lambda: {
+            "cpu_percent": 10.0, "memory_percent": 40.0,
+            "memory_total_bytes": 16 * 1024**3, "memory_available_bytes": 8 * 1024**3,
+        })
+        controller._android_memory_status = Mock(return_value=None)
+        status = controller.health_status({"running": False, "adb_state": "unavailable"}, datetime.now(timezone.utc))
+        self.assertEqual(status["overall_level"], "healthy")
 
     def test_web_ui_emulator_start_records_failed_attempt(self):
         controller = ZhuoruiController(self.root, runner=FakeRunner())
@@ -248,7 +380,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
 
     def test_scheduled_restart_observes_order_and_delays(self):
         now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
-        controller = ZhuoruiController(self.root, runner=FakeRunner())
+        controller = ZhuoruiController(self.root, backend="ui", runner=FakeRunner())
         events = []
         controller.stop_script = Mock(side_effect=lambda: events.append("stop listener") or ActionResult(True, "done"))
         controller.stop_emulator = Mock(side_effect=lambda: events.append("stop emulator") or ActionResult(True, "done"))
@@ -280,7 +412,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
             "zhuorui_emulator.current.json",
             {"last_restart_utc": (now - timedelta(minutes=30)).isoformat()},
         )
-        controller = ZhuoruiController(self.root, runner=FakeRunner())
+        controller = ZhuoruiController(self.root, backend="ui", runner=FakeRunner())
         controller.stop_script = Mock(return_value=ActionResult(True, "done"))
 
         result = controller.scheduled_restart_if_due(now, waiter=lambda _seconds: False)
@@ -296,7 +428,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
         )
         now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
         runner = FakeRunner()
-        controller = ZhuoruiController(self.root, runner=runner)
+        controller = ZhuoruiController(self.root, backend="ui", runner=runner)
         controller.stop_script = Mock(return_value=ActionResult(True, "done"))
         controller.stop_emulator = Mock(side_effect=[ActionResult(True, "done"), ActionResult(True, "done")])
         controller._start_emulator = Mock(return_value=ActionResult(True, "done"))
@@ -325,7 +457,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.write_json(
-            "zhuorui_listener.current.json",
+            "zhuorui_api_listener.current.json",
             {"pid": 4321, "stdout": str(current_log)},
         )
         controller = ZhuoruiController(self.root, runner=FakeRunner())
@@ -352,7 +484,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.write_json(
-            "zhuorui_listener.current.json",
+            "zhuorui_api_listener.current.json",
             {"pid": 4321, "stdout": str(current_log)},
         )
         controller = ZhuoruiController(self.root, runner=FakeRunner())
@@ -478,6 +610,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
     def test_android_memory_pressure_drives_restart_level(self):
         controller = ZhuoruiController(
             self.root,
+            backend="ui",
             runner=FakeRunner(),
             machine_sampler=lambda: {
                 "cpu_percent": 20.0,

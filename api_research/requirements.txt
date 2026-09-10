@@ -1,0 +1,4 @@
+# Investigation only; do not install into the trading listener's environment.
+mitmproxy==12.2.3
+androguard==4.1.4
+lz4==4.4.4

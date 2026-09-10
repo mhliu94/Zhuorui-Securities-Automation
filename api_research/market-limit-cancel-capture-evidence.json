@@ -1,0 +1,565 @@
+{
+  "verified_utc": "2026-09-10T00:36:06.863789+00:00",
+  "since_utc": "2026-09-10T00:29:00+00:00",
+  "submissions": [
+    {
+      "time_utc": "2026-09-10T00:29:40.071388+00:00",
+      "path": "/as_trade/api/order/v1/entrust_enter",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "volumeMultiple": "int",
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "entrustBs": "str",
+        "sign": "str",
+        "entrustAmount": "int",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str",
+        "data": {
+          "orderNo": "str",
+          "orderTxnReference": "str"
+        }
+      },
+      "signature_verified_offline": true,
+      "reconciled_states": [
+        {
+          "observed_utc": "2026-09-10T00:29:43.011765+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:29:43.277206+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:29:50.240925+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:29:56.642004+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:30:39.726716+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:30:40.011072+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:12.496567+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:19.253866+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:22.661936+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:24.144683+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:28.478662+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:31.177144+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "MO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        }
+      ],
+      "observed_instruction": {
+        "entrustProp": "MO",
+        "entrustBs": "1",
+        "ts": "US",
+        "apStatus": 0,
+        "volumeMultiple": 1
+      },
+      "price_field_present": false,
+      "time_in_force_present": false
+    },
+    {
+      "time_utc": "2026-09-10T00:30:35.302471+00:00",
+      "path": "/as_trade/api/order/v1/entrust_enter",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "volumeMultiple": "int",
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "entrustBs": "str",
+        "allowPrePost": "str",
+        "sign": "str",
+        "entrustPrice": "Decimal",
+        "entrustAmount": "int",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str",
+        "data": {
+          "orderNo": "str",
+          "orderTxnReference": "str"
+        }
+      },
+      "signature_verified_offline": true,
+      "reconciled_states": [
+        {
+          "observed_utc": "2026-09-10T00:30:39.726716+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:30:40.011072+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:12.496567+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:19.253866+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:22.661936+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:24.144683+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:28.478662+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:31.177144+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        }
+      ],
+      "observed_instruction": {
+        "entrustProp": "LO",
+        "entrustBs": "1",
+        "ts": "US",
+        "allowPrePost": "Y",
+        "apStatus": 0,
+        "volumeMultiple": 1
+      },
+      "price_field_present": true,
+      "time_in_force_present": false
+    },
+    {
+      "time_utc": "2026-09-10T00:31:32.806971+00:00",
+      "path": "/as_trade/api/order/v1/entrust_enter",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "volumeMultiple": "int",
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "entrustBs": "str",
+        "allowPrePost": "str",
+        "sign": "str",
+        "entrustPrice": "Decimal",
+        "entrustAmount": "int",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str",
+        "data": {
+          "orderNo": "str",
+          "orderTxnReference": "str"
+        }
+      },
+      "signature_verified_offline": true,
+      "reconciled_states": [
+        {
+          "observed_utc": "2026-09-10T00:35:12.496567+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:19.253866+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:22.661936+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:24.144683+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:28.478662+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:31.177144+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION",
+          "matched_both_submission_references": true
+        }
+      ],
+      "observed_instruction": {
+        "entrustProp": "LO",
+        "entrustBs": "1",
+        "ts": "US",
+        "allowPrePost": "N",
+        "apStatus": 0,
+        "volumeMultiple": 1
+      },
+      "price_field_present": true,
+      "time_in_force_present": false
+    }
+  ],
+  "cancellations": [
+    {
+      "time_utc": "2026-09-10T00:31:35.421190+00:00",
+      "path": "/as_trade/api/order/v1/entrust_withdraw",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "timeStamp": "int",
+        "sign": "str",
+        "orderTxnReference": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str"
+      },
+      "signature_verified_offline": true,
+      "reconciled_states": [
+        {
+          "observed_utc": "2026-09-10T00:35:12.496567+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:19.253866+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:22.661936+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:24.144683+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:28.478662+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:31.177144+00:00",
+          "entrustStatus": "9",
+          "entrustProp": "LO",
+          "entrustBs": "1",
+          "timeInForce": "DAY",
+          "sessionType": "0",
+          "isOpen": true,
+          "zero_fills": true,
+          "reason": "NOT_TRADE_SESSION"
+        }
+      ],
+      "matched_submission_times_utc": [
+        "2026-09-10T00:31:32.806971+00:00"
+      ],
+      "order_id_present": false,
+      "remark_present": false,
+      "identifier_matches": [
+        {
+          "observed_utc": "2026-09-10T00:35:12.496567+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:19.253866+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:22.661936+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:24.144683+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:28.478662+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        },
+        {
+          "observed_utc": "2026-09-10T00:35:31.177144+00:00",
+          "orderId_matches_fields": [],
+          "transaction_reference_matched": true,
+          "before_cancel": false
+        }
+      ]
+    }
+  ],
+  "requests_sent_by_research_tools": 0
+}

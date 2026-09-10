@@ -1,0 +1,35 @@
+{
+  "investigation_date_utc": "2026-09-08",
+  "app_package": "com.zhuorui.securities",
+  "app_version": "3.1.5",
+  "apk_sha256": "66ccf60d7e92c1fc97e86c0f9fa0544c3de1df480c5689627d4f1c90aba69b93",
+  "capture_http_responses": 21,
+  "capture_unique_paths": 17,
+  "observed_host": "backendpro.zr.hk",
+  "signed_public_query": {
+    "host": "backendpro.zr.hk",
+    "path": "/as_common/api/app_version/v1/get_new_version",
+    "http_status": 200,
+    "application_code": "000000",
+    "response_keys": [
+      "code",
+      "data",
+      "msg"
+    ],
+    "data_keys": [
+      "desc",
+      "descMultilingual",
+      "lowVersion",
+      "url",
+      "version"
+    ],
+    "elapsed_seconds": 0.234,
+    "fresh_signature": true,
+    "authenticated": false,
+    "proxy_used": false
+  },
+  "authenticated_holdings_tested": false,
+  "orders_submitted": 0,
+  "cancellations_submitted": 0,
+  "production_code_modified_by_investigation": false
+}

@@ -1,0 +1,36 @@
+{
+  "date_utc": "2026-09-10",
+  "mode": "API password login and read-only holdings publication",
+  "orders_submitted": 0,
+  "live_order_execution_enabled": false,
+  "observed_logout_at_unix": 1789010664.395363,
+  "scheduled_login_at_unix": 1789010964.395363,
+  "scheduled_delay_seconds": 300.0,
+  "attempts_before_deadline": 0,
+  "validation_pending": false,
+  "login_succeeded_at_utc": "2026-09-10T03:29:25.331148+00:00",
+  "observed_publications": [
+    {
+      "acknowledged_at_utc": "2026-09-10T03:29:26.980537+00:00",
+      "reason": "login_recovery",
+      "count": 1
+    },
+    {
+      "acknowledged_at_utc": "2026-09-10T03:29:55.635250+00:00",
+      "reason": "periodic",
+      "count": 2
+    },
+    {
+      "acknowledged_at_utc": "2026-09-10T03:30:25.852715+00:00",
+      "reason": "periodic",
+      "count": 3
+    }
+  ],
+  "session_valid": true,
+  "kafka_connected": true,
+  "validation_successful": true,
+  "periodic_ack_interval_seconds": 30.217465,
+  "listener_running": true,
+  "final_error": null,
+  "offline_tests_passed": 368
+}

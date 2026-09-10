@@ -1,0 +1,122 @@
+{
+  "time_utc": "2026-09-09T02:45:45.229375+00:00",
+  "results": [
+    {
+      "query": "holdings",
+      "path": "/as_trade/api/order/v1/get_hold_list",
+      "http_status": 200,
+      "application_code": "000000",
+      "elapsed_seconds": 0.297,
+      "request_sent": true
+    },
+    {
+      "query": "cash",
+      "path": "/as_trade/api/funds/v1/info",
+      "http_status": 200,
+      "application_code": "000000",
+      "elapsed_seconds": 0.844,
+      "request_sent": true
+    }
+  ],
+  "comparison": {
+    "holdings": {
+      "response_schema": {
+        "holdList": [
+          {
+            "ts": "str",
+            "code": "str",
+            "name": "str",
+            "market": "int",
+            "type": "int",
+            "jumpable": "bool",
+            "costPrice": "float",
+            "currentAmount": "int",
+            "enableAmount": "int",
+            "last": "float",
+            "todayIncome": "int",
+            "positionPnl": "float",
+            "marketValue": "float",
+            "positionPnlRate": "float",
+            "positionProportion": "float"
+          }
+        ]
+      },
+      "changed_fields": {
+        "data.holdList[].todayIncome": 3,
+        "data.holdList[].positionPnl": 3,
+        "data.holdList[].marketValue": 3,
+        "data.holdList[].last": 3,
+        "data.holdList[].positionPnlRate": 3
+      },
+      "identity_quantity_cost_match": true,
+      "position_count": 4,
+      "observed_markets": [
+        2
+      ]
+    },
+    "cash": {
+      "response_schema": [
+        {
+          "moneyType": "str",
+          "fundAccount": "str",
+          "accType": "str",
+          "mv": "float",
+          "enableBalance": "float",
+          "enableBalances": {
+            "usEnableBalance": "float",
+            "hkEnableBalance": "int",
+            "cnEnableBalance": "int"
+          },
+          "enableCash": "float",
+          "netAssets": "float",
+          "uncomeFundBalance": "int",
+          "cashBalance": "int",
+          "ipoInTransitBalance": "int",
+          "cashAmt": "float",
+          "cashAmts": {
+            "usCashAmt": "float",
+            "hkCashAmt": "int",
+            "cnCashAmt": "int"
+          },
+          "freezeAmt": "int",
+          "fetchBalance": "float",
+          "fetchBalances": {
+            "usFetchBalance": "float",
+            "hkFetchBalance": "int",
+            "cnFetchBalance": "int"
+          },
+          "singleFetchBalance": "float",
+          "dayGain": "float",
+          "positionPnl": "float",
+          "financeInterest": "int",
+          "marginCall": "int",
+          "todayIncome": "float",
+          "titanRiskManagementStatus": "int",
+          "leverageRatio": "float",
+          "marginInitial": "float",
+          "marginMaintenance": "float",
+          "excessLiquidity": "float"
+        }
+      ],
+      "changed_fields": {
+        "data[].positionPnl": 3,
+        "data[].mv": 3,
+        "data[].marginInitial": 3,
+        "data[].enableBalances.usEnableBalance": 3,
+        "data[].netAssets": 3,
+        "data[].todayIncome": 3,
+        "data[].excessLiquidity": 3,
+        "data[].marginMaintenance": 3,
+        "data[].enableBalance": 3
+      },
+      "account_currency_cash_fields_match": true,
+      "currency_codes": [
+        "CNY",
+        "HKD",
+        "USD"
+      ]
+    }
+  },
+  "transport": "Direct HTTPS from Windows; explicit empty proxy configuration; no ADB calls",
+  "authentication": "Captured existing app session; independent session renewal not yet tested"
+}

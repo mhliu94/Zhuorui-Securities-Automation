@@ -11,7 +11,8 @@ const state = {
 const elements = Object.fromEntries(
   [
     "account-id", "server-id", "script-card", "script-status", "script-pid",
-    "script-started", "script-duration", "script-message", "script-start", "script-stop",
+    "script-started", "script-duration", "script-message", "script-start", "script-stop", "script-restart",
+    "script-execution", "script-last-publish", "script-title", "service-description", "query-session-label",
     "emulator-card", "emulator-status", "emulator-avd", "emulator-device",
     "emulator-availability", "emulator-started", "emulator-duration",
     "emulator-message", "emulator-start", "emulator-stop",
@@ -133,6 +134,7 @@ function setButtonState() {
   const busy = Boolean(state.busyAction);
   elements["script-start"].disabled = busy || scriptRunning;
   elements["script-stop"].disabled = busy || !scriptRunning;
+  elements["script-restart"].disabled = busy || !scriptRunning;
   elements["emulator-start"].disabled = busy || emulatorRunning;
   elements["emulator-stop"].disabled = busy || !emulatorRunning;
   elements["refresh-status"].disabled = busy;
@@ -143,6 +145,28 @@ function renderStatus(payload) {
   const script = payload.script || {};
   const emulator = payload.emulator || {};
   const account = payload.account || {};
+  const isApi = (script.backend || account.backend) !== "ui";
+  const serviceName = isApi ? "API" : "UI";
+  elements["script-title"].textContent = `Zhuorui ${serviceName} Listener`;
+  elements["query-session-label"].textContent = `CURRENT ${serviceName} LISTENER SESSION`;
+  elements["service-description"].textContent = isApi
+    ? "Control API trading and account updates. Holdings publish every 30 seconds and after order submissions."
+    : "Control emulator trading and account updates. Keep the Android emulator running while the UI listener is active.";
+  for (const [action, icon] of [["start", "▶"], ["restart", "↻"], ["stop", "■"]]) {
+    elements[`script-${action}`].textContent = `${icon} ${action[0].toUpperCase() + action.slice(1)} ${serviceName}`;
+  }
+  elements["script-restart"].dataset.confirm = isApi
+    ? "Restart the API listener after active work finishes?"
+    : "Restart the UI listener? Active Android automation will be interrupted.";
+  elements["script-stop"].dataset.confirm = isApi
+    ? "Stop the API listener after active work finishes?"
+    : "Stop the UI listener? Trading commands and holdings updates will pause.";
+  elements["emulator-stop"].dataset.confirm = isApi
+    ? "Stop the Android emulator? API queries and password login use the saved identity."
+    : "Stop the Android emulator? This interrupts the UI trading listener.";
+  const liveOrders = script.running ? script.live_orders_enabled : account.live_orders_enabled;
+  elements["script-execution"].textContent = liveOrders ? "Live orders enabled" : "Validation only";
+  elements["script-last-publish"].textContent = localDateTime(script.last_holdings_publish);
 
   elements["account-id"].textContent = account.account_id || "Account not configured";
   elements["server-id"].textContent = account.server_id || "Zhuorui server";

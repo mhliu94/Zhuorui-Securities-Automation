@@ -1,0 +1,1 @@
+"""Zhuorui automation project."""

@@ -1,0 +1,64 @@
+{
+  "app_version": "3.1.5",
+  "apk_sha256": "66ccf60d7e92c1fc97e86c0f9fa0544c3de1df480c5689627d4f1c90aba69b93",
+  "method": "Local APK bytecode inspection and existing user-generated capture analysis; no broker requests or trades sent",
+  "cash": {
+    "path": "/as_trade/api/funds/v1/info",
+    "response_data": "List of fund-account rows in USD, HKD and CNY valuation currencies",
+    "account_selection": ["fundAccount", "accType"],
+    "valuation_selection": "moneyType",
+    "proof_class": "com.zhuorui.securities.transaction.ui.SecuritiesAccountDetailFragment",
+    "proof_method": "setStockAccountDetail",
+    "ui_to_api_mapping": {
+      "tvUSDCash": "cashAmts.usCashAmt",
+      "tvHKDCash": "cashAmts.hkCashAmt",
+      "tvCNHCash": "cashAmts.cnCashAmt"
+    },
+    "legacy_snapshot_cash_currency": "USD",
+    "legacy_snapshot_native_currencies": ["USD", "HKD", "CNH"],
+    "excluded_fields": {
+      "cashAmt": "Amount converted into the selected valuation currency",
+      "cashBalance": "Rendered as Saving Plus balance by this APK",
+      "enableCash": "Different broker measure; not the legacy UI cash labels"
+    }
+  },
+  "holdings": {
+    "path": "/as_trade/api/order/v1/get_hold_list",
+    "response_list": "data.holdList",
+    "mapping": {"symbol": "code", "qty": "currentAmount", "avg_price": "costPrice"},
+    "quantity_note": "Held quantity currentAmount, not available-to-sell enableAmount",
+    "number_encoding": "Decimal values serialized as JSON numbers without a floating-point round trip"
+  },
+  "side": {
+    "proof_class": "com.zrlib.lib_service.transaction.enums.BSFlag",
+    "proof_method": "<clinit> and getCode",
+    "request_factory": "com.zhuorui.securities.transaction.model.order.CommonOrderCommitModel creates OrderActionAddRequest using BSFlag.getCode",
+    "entrustBs": {"buy": "1", "sell": "2"},
+    "validation": "Buy observed in user capture; both codes and their request use proven from APK; sell submission not tested live"
+  },
+  "order_states": {
+    "proof_class": "com.zhuorui.securities.transaction.enums.OrderState$HS",
+    "HS": {
+      "0": "NoRegister", "1": "WaitForRegister", "2": "HostRegister",
+      "3": "WaitForCancel", "A": "WaitForModify", "H": "PendingReview",
+      "8": "Filled", "7": "PartFilled", "4": "PartFilledWaitForCancel",
+      "E": "PartWaitForModify", "5": "PartCancelled", "G": "PartCancelExpired",
+      "6": "Cancelled", "F": "CancelExpired", "9": "HostReject", "J": "ReviewReject"
+    },
+    "RW": ["ACK", "PENDING_NEW", "NEW", "PENDING_REPLACE", "PENDING_CANCEL", "REPLACED", "FILLED", "PARTIALLY_FILLED", "CANCELED", "REJECTED", "SUSPENDED", "DONE_FOR_DAY"],
+    "cancel_note": "App supports waiting, partially filled, or pending-review orders. isOpen alone does not prove eligibility. The API listener should reconcile pending cancellation instead of blindly resending."
+  },
+  "quote": {
+    "host": "backendpro.zr.hk",
+    "method": "POST",
+    "path": "/as_market/api/stock_price/v1/get_prices",
+    "request": {"stockVos": [{"code": "<symbol>", "ts": "US"}], "timeStamp": "<epoch milliseconds>", "sign": "<fresh signature>"},
+    "response_data": "List of quote objects",
+    "response_fields": ["ts", "code", "type", "delay", "preClose", "last", "close", "turnover", "suspension", "time", "name", "pctTag"],
+    "time_units": "Unix milliseconds, observed 13-digit values",
+    "stock_status_proof": "com.zhuorui.quote.model.QuoteStatus$Companion",
+    "suspension_field_mapping": {"1": "Trading", "3": "Trading", "2": "Suspension", "4": "Belisted", "5": "Fusing", "6": "Delisting", "8": "Expire"},
+    "US_capture_observation": "All 17 existing US quote observations had delay=true and suspension=1; real-time availability remains unproven",
+    "price_note": "last is a quote input for optional whole-share notional sizing; it is not an order limit price. Delayed or stale quotes must not be silently treated as current."
+  }
+}

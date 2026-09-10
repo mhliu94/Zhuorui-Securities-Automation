@@ -1,0 +1,118 @@
+{
+  "verified_utc": "2026-09-10T00:28:11.115038+00:00",
+  "user_reported_action": "Opened BILI Buy ticket and selected Market without submission",
+  "authenticated_session_restored": true,
+  "observations": [
+    {
+      "time_utc": "2026-09-10T00:26:41.958232+00:00",
+      "path": "/as_user/api/user_account/v1/user_login_pwd",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "timeStamp": "int",
+        "phone": "str",
+        "accountType": "int",
+        "loginPassword": "str",
+        "sign": "str",
+        "phoneArea": "str",
+        "type": "int"
+      },
+      "signature_verified_offline": true,
+      "response_data_keys": [
+        "certification",
+        "loginEmail",
+        "phone",
+        "phoneArea",
+        "token",
+        "userId",
+        "zrNo"
+      ],
+      "has_session_token": false
+    },
+    {
+      "time_utc": "2026-09-10T00:26:57.010047+00:00",
+      "path": "/as_trade/api/account/v1/auth",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "timeStamp": "int",
+        "password": "str",
+        "clientId": "str",
+        "sign": "str"
+      },
+      "signature_verified_offline": true,
+      "response_data_keys": [
+        "forceChangePwd",
+        "userId"
+      ],
+      "has_session_token": true
+    },
+    {
+      "time_utc": "2026-09-10T00:27:05.791482+00:00",
+      "path": "/as_trade/api/order/v1/get_stock_amount",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "sign": "str",
+        "entrustPrice": "Decimal",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "signature_verified_offline": true,
+      "response_data_keys": [
+        "availBuyAmount",
+        "enableBuyAmount",
+        "enableBuyAmountM",
+        "enableSellAmount",
+        "maxSellShortQuantity",
+        "positionQty"
+      ],
+      "has_session_token": true,
+      "observed_instruction": {
+        "entrustProp": "LO",
+        "ts": "US",
+        "apStatus": 0
+      },
+      "price_field_present": true,
+      "symbol_matches_user_report": true
+    },
+    {
+      "time_utc": "2026-09-10T00:27:10.803749+00:00",
+      "path": "/as_trade/api/order/v1/get_stock_amount",
+      "http_status": 200,
+      "application_code": "000000",
+      "request_schema": {
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "sign": "str",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "signature_verified_offline": true,
+      "response_data_keys": [
+        "availBuyAmount",
+        "enableBuyAmount",
+        "enableBuyAmountM",
+        "enableSellAmount",
+        "maxSellShortQuantity",
+        "positionQty"
+      ],
+      "has_session_token": true,
+      "observed_instruction": {
+        "entrustProp": "MO",
+        "ts": "US",
+        "apStatus": 0
+      },
+      "price_field_present": false,
+      "symbol_matches_user_report": true
+    }
+  ],
+  "order_submissions_in_resumed_session": 0,
+  "cancellations_in_resumed_session": 0,
+  "requests_sent_by_research": 0,
+  "scope": "Offline analysis of user-operated app traffic. Market preview is verified; submission body, broker acceptance and execution remain unverified. Password transformation and independent login remain unverified."
+}

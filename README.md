@@ -1,139 +1,233 @@
 # Zhuorui Securities Automation
 
-This project includes an authenticated control room for the Zhuorui trading listener and its Android emulator on Windows and Linux.
+Windows tools for direct HTTP API trading, Kafka account publishing and a web
+Control Room, with Linux support for the retained emulator/UI listener. Both
+implementations read the same `zhuorui_config.json`. See [Linux UI setup](docs/linux-ui.md).
+
+| Component | Current capability |
+| --- | --- |
+| UI listener | Existing Kafka trading workflow, holdings and emulator login handling. |
+| API CLI | Import an app session, check authentication, query holdings, cash and today's orders. |
+| API login recovery | Re-login directly with the imported device identity, using the shared login credentials and Beijing-time delay policy. |
+| API trading listener | Kafka Buy/Sell Market, Limit, one-second timed-cancel and cancellation commands. |
+| API publications | Account details every 30 seconds, plus a queued publication after every order submission attempt and cancellation attempt. |
+| Control Room | Starts, stops and restarts the API listener; reports trading mode and publication status. |
+
+## Project layout
+
+```text
+zhuorui/
+  common/config.py         Shared configuration and credential lookup
+  ui/automation.py         Existing emulator trading implementation
+  api/                     HTTP client, Kafka listener, execution, journal and sessions
+  capture/config.py        Portable emulator/capture settings and boot validation
+  monitor/server.py        Control Room server
+scripts/windows/           Windows process, HTTPS and firewall helpers
+tests/                     UI, monitor and API runtime tests
+docs/                      Operating guides and architecture
+monitor_web/               Dashboard static assets
+android/                   Android hierarchy-dump helper
+api_research/              Capture tools, protocol evidence and simulations
+  private/                 Captures, APK, CA keys, emulator backups; ignored
+runtime/                   Encrypted API session, command journal and state; ignored
+logs/                      Process logs
+zhuorui_config.json        Existing private configuration; ignored
+zhuorui_config.example.json
+zhuorui_api.py             API entry point
+zhuorui_market_order.py    UI compatibility entry point
+zhuorui_monitor.py         Dashboard compatibility entry point
+```
+
+Root PowerShell launchers forward to `scripts/windows`, preserving existing
+commands and dashboard controls. Configuration, logs, emulator data and dashboard
+assets retain their existing paths. See [architecture](docs/architecture.md).
+
+## Run the API script
+
+Use PowerShell from the project directory. Import and run sessions under the same
+Windows user. Create a separate API environment:
+
+```powershell
+py -m venv .venv-api
+.\.venv-api\Scripts\python.exe -m pip install -r requirements-api.txt
+```
+
+Use the existing `zhuorui_config.json`. For a new checkout only, copy the example
+to that name and fill in its settings. The optional `api` section has defaults.
+Do not overwrite a private config with
+the example.
+
+Check local setup without network requests:
+
+```powershell
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py status
+```
+
+Read the running emulator's identity, then import its existing login directly:
+
+```powershell
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py inspect-emulator
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py import-emulator-session
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py check-session
+```
+
+Direct import needs **root read access** on the selected emulator and the
+validated Zhuorui 3.1.5 build. It reads the broker user ID, token, app-specific
+device ID and headers automatically. It never performs a new login or enables
+root. The current temporary debug boot supports it; a normal Google Play emulator
+boot generally does not. The API environment alone is sufficient for this import.
+
+For another app build or an emulator without direct storage access, the existing
+capture importer remains available. With working capture on the **same logged-in
+emulator**, refresh holdings or Today's Orders, then import within ten minutes:
+
+```powershell
+.\api_research\.venv\Scripts\python.exe .\zhuorui_api.py import-session
+```
+
+Both importers encrypt the existing session with Windows DPAPI. Local import is
+not proof of server validity; `check-session` checks that separately. See
+[API setup and recovery](docs/api.md) and [another Windows machine/account](docs/windows-porting.md).
+
+Run direct account queries:
+
+```powershell
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py check-session
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py holdings
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py cash
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py orders
+```
+
+Direct query results contain the broker's raw private account fields. The Kafka
+listener maps account, cash and holdings reads to the existing KTrader snapshot
+format. Normal API operations use the encrypted session and HTTPS without UI
+clicks, proxy or emulator calls. After the initial session import, routine API
+password re-login also works without the emulator running. Keep access to the
+emulator for trading-password unlock, phone verification or a manual session import.
+
+The listener enables automatic login recovery by default through
+`api.auto_login_enabled`. It reuses `login.phone`, `login.password` and
+`login.phone_area` (default `"86"`) with the imported account/device identity.
+Logout first detected from **09:00 inclusive to 16:00 exclusive Beijing time**
+waits five minutes from detection; outside that interval, recovery is immediately
+eligible at the next command boundary. Duplicate errors and listener restarts do
+not reset that deadline. Verification or explicit login rejection pauses attempts;
+temporary connection failures retry after `api.login_retry_seconds` (default 300).
+Recovery never replays a trade. See [session recovery](docs/api.md#login-recovery)
+for configuration and manual recovery.
+
+Append `--config C:\path\to\config.json` after any command for another shared
+config. `python -m zhuorui.api <command>` is the equivalent package entry point.
+
+Inspect order formats offline:
+
+```powershell
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py plan-order BILI buy 1 --type market
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py plan-order BILI buy 1 --type limit --price 25.1000
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py plan-order BILI buy 1 --type timed-cancel --price 25.1000
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py plan-cancel EXAMPLE_ORDER_REFERENCE
+```
+
+These are synthetic plans and send nothing. Market uses native `MO` without a
+limit price. Buy and Sell are supported. Timed-cancel uses Limit with a one-second
+deadline from dispatch; it is not native FOK and permits partial fills. A late
+acknowledgement triggers cancellation when the reference becomes available;
+network delays can miss the target.
+
+## Start the API listener
+
+```powershell
+.\start_zhuorui_listener.ps1
+.\check_zhuorui_listener.ps1
+.\stop_zhuorui_listener.ps1
+```
+
+The launchers now default to API and use `.venv-api`, or another Python configured
+through `api.python_executable`. For foreground operation instead:
+
+```powershell
+.\.venv-api\Scripts\python.exe .\zhuorui_api.py listen
+```
+
+**Trading is enabled by default.** Both `api.live_orders_enabled` and the shared
+account `trading_enabled` switch default to `true`. An explicit `false` on either
+effective switch disables execution. For publishing-only operation, set
+`api.live_orders_enabled` to `false`; the listener still validates commands and
+publishes account details with `trading_enabled: false`. Configuration changes
+take effect on restart. Dashboard controls preserve the configured mode.
+
+The shared `kafka` section supplies the control-server address and topics. Set
+`kafka.holdings_interval_seconds` to `30`; this is also the API default. Each
+submission attempt queues an immediate fresh publication on an independent
+worker. Cancellation attempts also trigger one. Existing in-flight publications
+and broker or Kafka outages can delay delivery.
+
+Every command needs a matching `account_id` or `account_num_id`. Provided server
+selectors must match too. `MARKET_ORDER` uses native `MO` and rejects price fields.
+`LIMIT_ORDER` and `LIMIT_ORDER_FOK` require `qty_shares` and `limit_price`; FOK uses
+the one-second cancellation policy. Market also accepts `notional_usd` when a
+fresh real-time quote is available; delayed quotes require explicit `qty_shares`.
+
+Producer command IDs or stable Kafka coordinates prevent duplicate submission.
+Commands older than 120 seconds are rejected by default. An unknown submission
+pauses new execution for reconciliation and is never blindly retried. See
+[the API guide](docs/api.md) for routing, cancellation and recovery details.
+
+## Run the existing UI listener
+
+Install UI dependencies in `.venv` if needed:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Start the configured emulator and sign in, then use:
+
+```powershell
+.\start_zhuorui_listener.ps1 -Backend ui
+.\check_zhuorui_listener.ps1 -Backend ui
+.\stop_zhuorui_listener.ps1 -Backend ui
+```
+
+The explicit `-Backend ui` option runs the retained UI implementation. Launchers
+refuse simultaneous API and UI listeners. Its Market command still uses the
+price-adjusted Limit approach; its
+FOK command still uses the three-second Revoke behavior. The API requirements
+are different, as described above.
 
 ## Control Room
-
-Start the dashboard from PowerShell:
 
 ```powershell
 .\start_zhuorui_monitor.ps1 -OpenBrowser
 ```
 
-On Linux, use the matching Bash launcher:
+The dashboard defaults to API listener controls and reports its actual trading
+mode. Scheduled emulator restarts are disabled in API mode; restarting the API
+listener preserves the emulator login. See
+[the dashboard guide](docs/monitor.md) for login, HTTPS, remote access and options.
 
-```bash
-./start_zhuorui_monitor.sh --open-browser
-```
+## Tests
 
-The dashboard opens at `https://localhost/`, listens on standard HTTPS port 443, and checks the listener and emulator every 60 seconds. HTTP port 80 redirects browsers to HTTPS. Sign in with the single configured administrator account:
-
-- Username: `admin`
-- Password: `admin12345`
-
-It shows:
-
-- whether the Zhuorui listener is running;
-- its PID, start time, and live run duration;
-- the current listener session's last 10 completed holdings-query timings, including average, fastest, and slowest;
-- the configured Android virtual device and ADB connection state;
-- the emulator start time and live run duration;
-- five emulator-stress signals with a Healthy, Under load, or Restart recommended level: machine CPU, machine memory, Android memory pressure, ADB health, and Android response time;
-- controls to start or stop the listener and emulator.
-
-Use **Check now** for an immediate status refresh. Stop the dashboard itself with:
+UI and dashboard regression tests:
 
 ```powershell
-.\stop_zhuorui_monitor.ps1
+.\.venv\Scripts\python.exe -m unittest tests.test_zhuorui_market_order tests.test_zhuorui_monitor
 ```
 
-```bash
-./stop_zhuorui_monitor.sh
-```
-
-You can check it from PowerShell without opening a browser:
+API runtime tests use synthetic sessions and mocked HTTP responses:
 
 ```powershell
-.\check_zhuorui_monitor.ps1
+.\.venv-api\Scripts\python.exe -m unittest discover -s tests -p 'test_api*.py'
+.\.venv-api\Scripts\python.exe -m unittest tests.test_emulator_session tests.test_capture_config
 ```
 
-```bash
-./check_zhuorui_monitor.sh
-```
-
-The server uses HTTPS, secure server-side sessions, CSRF protection, and login rate limiting. The administrator password is stored in the source only as a salted PBKDF2 hash. Trading account credentials are never sent to the browser.
-
-## External access
-
-The launcher binds to `0.0.0.0` by default. Open the Windows Firewall ports once from an elevated PowerShell window:
+Research simulations and signing checks:
 
 ```powershell
-.\enable_zhuorui_monitor_firewall.ps1
+$env:PYTHONPATH = "$PWD;$PWD\api_research"
+.\api_research\.venv\Scripts\python.exe -m unittest discover -s api_research -p 'test_*.py'
 ```
 
-On Linux, the firewall helper supports UFW and firewalld:
-
-```bash
-sudo ./enable_zhuorui_monitor_firewall.sh
-```
-
-The launcher detects the machine's active IPv4 address and uses it for the external URL and HTTP-to-HTTPS redirects. If automatic detection is unavailable, set `public_host` in `zhuorui_config.json`. A router, cloud security group, or upstream network firewall may also need to allow TCP ports 80 and 443.
-
-The included setup creates a self-signed certificate automatically. Browsers will show a certificate warning until the certificate is trusted on the client or replaced with a public certificate for a DNS name. To use a public certificate, pass its PEM files with `-CertificatePath` and `-PrivateKeyPath`.
-
-Trust the generated certificate for browsers on the server by running this from an elevated PowerShell window:
-
-```powershell
-.\trust_zhuorui_monitor_certificate.ps1
-```
-
-On Linux, add it to the system trust store with:
-
-```bash
-sudo ./trust_zhuorui_monitor_certificate.sh
-```
-
-The Linux helper supports Debian/Ubuntu `update-ca-certificates`, Red Hat-family
-`update-ca-trust`, and p11-kit. Browser-specific certificate stores may still
-need a separate import.
-
-Each remote client must also trust `certs\zhuorui-monitor-cert.cer`, otherwise its browser will continue to reject the self-signed certificate.
-
-## Configuration
-
-The dashboard reuses `zhuorui_config.json`. These fields control the emulator integration and the optional public-host fallback:
-
-```json
-{
-  "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
-  "device": "emulator-5554",
-  "avd": "Pixel_10_2",
-  "emulator_accel": "on",
-  "public_host": "dashboard.example.com"
-}
-```
-
-`emulator` may optionally be set to the full path of the platform's emulator executable (`emulator.exe` on Windows or `emulator` on Linux). When omitted, the dashboard derives it from the configured ADB path. `emulator_accel` accepts `auto`, `on`, or `off`; `on` requires an available hardware accelerator and refuses to fall back to software emulation. On Windows, the emulator uses WHPX when it is the installed accelerator.
-
-On Linux, use paths such as `$HOME/Android/Sdk/platform-tools/adb` and
-`$HOME/Android/Sdk/emulator/emulator`; hardware acceleration requires working
-KVM access. If the SDK tools are on `PATH`, the Python programs discover them
-automatically.
-
-For normal operation, start the emulator first and wait for **Running**, then start the listener. Stopping the emulator while the listener is running will interrupt Android automation.
-
-While the dashboard is running, it checks every 30 seconds for a scheduled restart window from 8:01 PM through 9:00 PM America/New_York time. If the last automatic or Web UI emulator start attempt was more than one hour ago, it stops the listener, stops the emulator, waits one minute, starts the emulator, waits two minutes, and makes up to five attempts to foreground Zhuorui before restarting the listener. A failed foreground check stops the emulator again. The restart-attempt time is persisted even when the restart fails.
-
-## Direct server options
-
-The PowerShell launcher accepts `-Port`, `-HostAddress`, `-PublicHost`, `-Interval`, `-CertificatePath`, and `-PrivateKeyPath`. The Python server has matching options. Omit the public-host option to use automatic detection with the configuration fallback:
-
-```powershell
-.\.venv\Scripts\python.exe .\zhuorui_monitor.py --host 0.0.0.0 --port 443 --redirect-http-port 80 --interval 60 --cert-file .\certs\zhuorui-monitor-cert.pem --key-file .\certs\zhuorui-monitor-key.pem
-```
-
-The Linux launcher exposes the corresponding long options (`--port`,
-`--host-address`, `--public-host`, `--interval`, `--certificate-path`, and
-`--private-key-path`). Direct invocation looks like:
-
-```bash
-./.venv/bin/python ./zhuorui_monitor.py --host 0.0.0.0 --port 443 --redirect-http-port 80 --interval 60 --cert-file ./certs/zhuorui-monitor-cert.pem --key-file ./certs/zhuorui-monitor-key.pem
-```
-
-Ports below 1024 require root or the `CAP_NET_BIND_SERVICE` capability on Linux.
-The listener can be managed directly with `start_zhuorui_listener.sh`,
-`check_zhuorui_listener.sh`, and `stop_zhuorui_listener.sh`. The Android helper
-JAR can be rebuilt with `android/build_zero_idle_dump.sh`; it needs an Android
-SDK platform, build-tools, a JDK, and JUnit 4.
-
-No additional Python packages are required for the dashboard.
+No test submits or cancels a real trade. [Protocol evidence](api_research/README.md)
+distinguishes observed formats and verified login recovery from unverified trade execution.

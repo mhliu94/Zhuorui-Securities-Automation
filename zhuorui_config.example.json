@@ -1,10 +1,11 @@
 {
-  "trade_password": "wjy888",
+  "trade_password": "replace-with-trading-password",
   "login": {
     "phone": "replace-with-phone-number",
+    "phone_area": "86",
     "password": "replace-with-login-password"
   },
-  "adb": "C:\\Users\\Administrator\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe",
+  "adb": "C:\\Android\\Sdk\\platform-tools\\adb.exe",
   "device": "emulator-5554",
   "avd": "Pixel_10_2",
   "emulator_accel": "on",
@@ -18,7 +19,7 @@
   "account_num_id": 1,
   "trading_enabled": true,
   "kafka": {
-    "bootstrap_servers": "45.32.121.19:9092",
+    "bootstrap_servers": "127.0.0.1:9092",
     "command_topic": "trading-commands",
     "holdings_topic": "account-details",
     "order_status_topic": "order-status",
@@ -26,7 +27,46 @@
     "group_id": "zhuorui-trading-servers",
     "client_id": "zhuorui-1",
     "auto_offset_reset": "latest",
-    "holdings_interval_seconds": 120,
+    "holdings_interval_seconds": 30,
     "poll_seconds": 1
+  },
+  "api": {
+    "expected_user_id": null,
+    "session_file": "runtime/api/session.dpapi",
+    "capture_file": "api_research/private/zhuorui-flows.mitm",
+    "apk_file": "api_research/private/zhuorui.apk",
+    "request_timeout_seconds": 10,
+    "session_max_capture_age_seconds": 600,
+    "cancel_after_seconds": 1,
+    "live_orders_enabled": true,
+    "auto_import_session": false,
+    "auto_login_enabled": true,
+    "login_retry_seconds": 300,
+    "command_max_age_seconds": 120,
+    "quote_max_age_seconds": 30,
+    "journal_file": "runtime/api/commands.sqlite3",
+    "state_file": "runtime/api/listener-state.json",
+    "stop_file": "runtime/api/listener.stop"
+  },
+  "capture": {
+    "sdk_root": null,
+    "emulator_executable": null,
+    "avd_home": null,
+    "original_avd_dir": null,
+    "system_image_dir": null,
+    "test_system_image_dir": null,
+    "private_dir": "api_research/private",
+    "python_executable": "api_research/.venv/Scripts/python.exe",
+    "mitmdump_executable": "api_research/.venv/Scripts/mitmdump.exe",
+    "debug_policy_file": null,
+    "debug_ramdisk_file": null,
+    "proxy_listen_host": "127.0.0.1",
+    "proxy_port": 8082,
+    "emulator_proxy_host": "10.0.2.2",
+    "test_avd": "ZhuoruiCapture",
+    "test_port": 5580,
+    "boot_test_avd": "ZhuoruiBootTest",
+    "boot_test_port": 5582,
+    "boot_timeout_seconds": 180
   }
 }

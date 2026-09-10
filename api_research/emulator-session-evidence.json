@@ -1,0 +1,16 @@
+{
+  "date_utc": "2026-09-10",
+  "app_version": "3.1.5",
+  "android_release_tested": "16",
+  "apk_sha256": "66ccf60d7e92c1fc97e86c0f9fa0544c3de1df480c5689627d4f1c90aba69b93",
+  "source": "existing_logged_in_emulator_with_root_reads",
+  "new_login_performed": false,
+  "all_11_generated_headers_match_captured_app_requests": true,
+  "verified_header_names": ["token", "userid", "deviceid", "devicename", "devicemodel", "ostype", "osversion", "appversion", "lang", "content-type", "user-agent"],
+  "session_storage": "Windows DPAPI",
+  "direct_account_query_success": true,
+  "direct_holdings_query_success": true,
+  "read_requests_sent": 2,
+  "trade_requests_sent": 0,
+  "limitations": ["root read access required for import", "only exact validated APK supported by direct importer", "main Android user only", "automatic re-login and renewal not implemented", "no emulator-stopped expiry test"]
+}

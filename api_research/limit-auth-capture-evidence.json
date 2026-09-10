@@ -1,0 +1,150 @@
+{
+  "date_utc": "2026-09-09T02:57:32.187367+00:00",
+  "auth_attempts": [
+    {
+      "time_utc": "2026-09-09T02:48:37.005308+00:00",
+      "path": "/as_trade/api/account/v1/auth",
+      "http_status": 200,
+      "application_code": "350117",
+      "signature_verified_offline": true,
+      "request_schema": {
+        "timeStamp": "int",
+        "password": "str",
+        "clientId": "str",
+        "sign": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str"
+      },
+      "outcome": "incorrect_password"
+    },
+    {
+      "time_utc": "2026-09-09T02:49:04.906964+00:00",
+      "path": "/as_trade/api/account/v1/auth",
+      "http_status": 200,
+      "application_code": "350117",
+      "signature_verified_offline": true,
+      "request_schema": {
+        "timeStamp": "int",
+        "password": "str",
+        "clientId": "str",
+        "sign": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str"
+      },
+      "outcome": "incorrect_password"
+    },
+    {
+      "time_utc": "2026-09-09T02:49:43.237982+00:00",
+      "path": "/as_trade/api/account/v1/auth",
+      "http_status": 200,
+      "application_code": "000000",
+      "signature_verified_offline": true,
+      "request_schema": {
+        "timeStamp": "int",
+        "password": "str",
+        "clientId": "str",
+        "sign": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str",
+        "data": {
+          "userId": "str",
+          "forceChangePwd": "int"
+        }
+      },
+      "outcome": "successful_unlock"
+    }
+  ],
+  "limit_submissions": [
+    {
+      "time_utc": "2026-09-09T02:50:06.471845+00:00",
+      "path": "/as_trade/api/order/v1/entrust_enter",
+      "http_status": 200,
+      "application_code": "000000",
+      "signature_verified_offline": true,
+      "request_schema": {
+        "volumeMultiple": "int",
+        "timeStamp": "int",
+        "entrustProp": "str",
+        "code": "str",
+        "entrustBs": "str",
+        "allowPrePost": "str",
+        "sign": "str",
+        "entrustPrice": "float",
+        "entrustAmount": "int",
+        "apStatus": "int",
+        "ts": "str"
+      },
+      "response_schema": {
+        "code": "str",
+        "msg": "str",
+        "data": {
+          "orderNo": "str",
+          "orderTxnReference": "str"
+        }
+      },
+      "observed_instruction": {
+        "entrustProp": "LO",
+        "entrustBs": "1",
+        "allowPrePost": "N",
+        "apStatus": 0,
+        "volumeMultiple": 1,
+        "ts": "US"
+      },
+      "timeInForce_explicitly_submitted": false,
+      "decimal_scale_preservation_required": true,
+      "reconciled_states": [
+        {
+          "time_utc": "2026-09-09T02:50:09.554572+00:00",
+          "entrustStatus": "9",
+          "businessAmount": 0,
+          "remark": "ORDER_EXECUTE_FAILED",
+          "opRemark": "Operation failed",
+          "timeInForce": "DAY",
+          "isOpen": true,
+          "reference_pair_matched": true
+        },
+        {
+          "time_utc": "2026-09-09T02:50:09.849102+00:00",
+          "entrustStatus": "9",
+          "businessAmount": 0,
+          "remark": "ORDER_EXECUTE_FAILED",
+          "opRemark": "Operation failed",
+          "timeInForce": "DAY",
+          "isOpen": true,
+          "reference_pair_matched": true
+        },
+        {
+          "time_utc": "2026-09-09T02:50:20.459650+00:00",
+          "entrustStatus": "9",
+          "businessAmount": 0,
+          "remark": "ORDER_EXECUTE_FAILED",
+          "opRemark": "Operation failed",
+          "timeInForce": "DAY",
+          "isOpen": true,
+          "reference_pair_matched": true
+        },
+        {
+          "time_utc": "2026-09-09T02:50:22.556177+00:00",
+          "entrustStatus": "9",
+          "businessAmount": 0,
+          "remark": "ORDER_EXECUTE_FAILED",
+          "opRemark": "Operation failed",
+          "timeInForce": "DAY",
+          "isOpen": true,
+          "reference_pair_matched": true
+        }
+      ],
+      "broker_reason_in_capture": "Generic execution failure; no specific trading-hours reason in these HTTP responses",
+      "user_reported_reason": "Outside trading hours"
+    }
+  ],
+  "cancel_requests_captured": 0,
+  "order_requests_sent_by_research_tools": 0,
+  "native_market_submission_captured": false
+}
