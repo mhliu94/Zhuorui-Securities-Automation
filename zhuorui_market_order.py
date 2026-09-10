@@ -139,11 +139,17 @@ DEFAULT_KAFKA_ORDER_STATUS_TOPIC = "order-status"
 DEFAULT_HOLDINGS_INTERVAL_SECONDS = 30.0
 DEFAULT_KAFKA_POLL_SECONDS = 1.0
 
+ADB_EXECUTABLE_NAME = "adb.exe" if os.name == "nt" else "adb"
 KNOWN_ADB_PATHS = [
-    Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / "adb.exe",
-    Path(os.environ.get("ANDROID_SDK_ROOT", "")) / "platform-tools" / "adb.exe",
-    Path.home() / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools" / "adb.exe",
+    Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / ADB_EXECUTABLE_NAME,
+    Path(os.environ.get("ANDROID_SDK_ROOT", "")) / "platform-tools" / ADB_EXECUTABLE_NAME,
 ]
+if os.name == "nt":
+    KNOWN_ADB_PATHS.append(
+        Path.home() / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools" / ADB_EXECUTABLE_NAME
+    )
+else:
+    KNOWN_ADB_PATHS.append(Path.home() / "Android" / "Sdk" / "platform-tools" / ADB_EXECUTABLE_NAME)
 
 
 class ZhuoruiAutomationError(RuntimeError):
@@ -4339,7 +4345,7 @@ def add_common_automation_args(parser: argparse.ArgumentParser) -> None:
         default=default_config_path(),
         help="JSON config file; defaults to zhuorui_config.json, then config.json",
     )
-    parser.add_argument("--adb", help="path to adb.exe")
+    parser.add_argument("--adb", help="path to the adb executable")
     parser.add_argument("--device", help="adb device serial, e.g. emulator-5554")
     parser.add_argument("--wait-timeout", type=float, help="seconds to wait for each UI transition")
     parser.add_argument("--artifact-dir", type=Path, help="optional directory for post-submit screenshots")

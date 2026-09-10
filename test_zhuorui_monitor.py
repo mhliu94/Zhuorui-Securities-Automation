@@ -1,5 +1,6 @@
 import json
 import http.client
+import os
 import subprocess
 import tempfile
 import threading
@@ -219,8 +220,9 @@ class ZhuoruiControllerTests(unittest.TestCase):
             [str(emulator), "-avd", "Pixel_10_2", "-accel", "on"],
         )
 
-    def test_start_listener_uses_existing_powershell_control(self):
-        (self.root / "start_zhuorui_listener.ps1").write_text("", encoding="utf-8")
+    def test_start_listener_uses_platform_control_script(self):
+        suffix = ".ps1" if os.name == "nt" else ".sh"
+        (self.root / f"start_zhuorui_listener{suffix}").write_text("", encoding="utf-8")
         control_runner = FakeRunner()
         controller = ZhuoruiController(
             self.root,
@@ -231,7 +233,7 @@ class ZhuoruiControllerTests(unittest.TestCase):
         result = controller.start_script()
 
         self.assertTrue(result.ok)
-        self.assertIn("start_zhuorui_listener.ps1", control_runner.calls[0][-1])
+        self.assertIn(f"start_zhuorui_listener{suffix}", control_runner.calls[0][-1])
 
     def test_web_ui_emulator_start_records_failed_attempt(self):
         controller = ZhuoruiController(self.root, runner=FakeRunner())

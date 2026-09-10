@@ -1,4 +1,4 @@
-"""Local Windows dashboard for the Zhuorui trading listener and emulator."""
+"""Local dashboard for the Zhuorui trading listener and emulator."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import ssl
@@ -138,7 +139,21 @@ def process_probe(pid: int) -> dict[str, Any]:
             os.kill(pid, 0)
         except (OSError, ValueError):
             return {"running": False, "started_epoch": None}
-        return {"running": True, "started_epoch": None}
+        started_epoch: float | None = None
+        if sys.platform.startswith("linux"):
+            try:
+                process_stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+                fields_after_name = process_stat[process_stat.rfind(")") + 2 :].split()
+                start_ticks = int(fields_after_name[19])
+                boot_epoch = next(
+                    int(line.split()[1])
+                    for line in Path("/proc/stat").read_text(encoding="ascii").splitlines()
+                    if line.startswith("btime ")
+                )
+                started_epoch = boot_epoch + start_ticks / os.sysconf("SC_CLK_TCK")
+            except (IndexError, KeyError, OSError, StopIteration, TypeError, ValueError):
+                pass
+        return {"running": True, "started_epoch": started_epoch}
 
     from ctypes import wintypes
 
@@ -192,7 +207,40 @@ def process_probe(pid: int) -> dict[str, Any]:
 
 
 def sample_machine_resources(sample_seconds: float = 0.15) -> dict[str, float | int | None]:
-    """Sample Windows CPU and physical memory without an external dependency."""
+    """Sample host CPU and physical memory without an external dependency."""
+    if os.name != "nt" and sys.platform.startswith("linux"):
+        try:
+            def cpu_times() -> tuple[int, int]:
+                first_line = Path("/proc/stat").read_text(encoding="ascii").splitlines()[0]
+                values = [int(value) for value in first_line.split()[1:]]
+                return sum(values[:8]), values[3] + (values[4] if len(values) > 4 else 0)
+
+            total_before, idle_before = cpu_times()
+            time.sleep(max(0.05, sample_seconds))
+            total_after, idle_after = cpu_times()
+            total_delta = total_after - total_before
+            idle_delta = idle_after - idle_before
+            cpu_percent = (
+                round(max(0.0, min(100.0, (total_delta - idle_delta) * 100 / total_delta)), 1)
+                if total_delta > 0
+                else None
+            )
+            memory_values: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+                key, separator, raw_value = line.partition(":")
+                if separator and key in {"MemTotal", "MemAvailable"}:
+                    memory_values[key] = int(raw_value.split()[0]) * 1024
+            total_memory = memory_values["MemTotal"]
+            available_memory = memory_values["MemAvailable"]
+            return {
+                "cpu_percent": cpu_percent,
+                "memory_percent": round((total_memory - available_memory) * 100 / total_memory, 1),
+                "memory_total_bytes": total_memory,
+                "memory_available_bytes": available_memory,
+            }
+        except (IndexError, KeyError, OSError, TypeError, ValueError, ZeroDivisionError):
+            pass
+
     if os.name != "nt":
         return {
             "cpu_percent": None,
@@ -610,13 +658,20 @@ class ZhuoruiController:
         candidates: list[Path] = []
         if isinstance(configured, str) and configured.strip():
             candidates.append(Path(os.path.expandvars(configured)))
+        executable_name = "adb.exe" if os.name == "nt" else "adb"
+        discovered = shutil.which(executable_name)
+        if discovered:
+            candidates.append(Path(discovered))
         for environment_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
             sdk = os.environ.get(environment_name)
             if sdk:
-                candidates.append(Path(sdk) / "platform-tools" / "adb.exe")
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            candidates.append(Path(local_app_data) / "Android" / "Sdk" / "platform-tools" / "adb.exe")
+                candidates.append(Path(sdk) / "platform-tools" / executable_name)
+        if os.name == "nt":
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            if local_app_data:
+                candidates.append(Path(local_app_data) / "Android" / "Sdk" / "platform-tools" / executable_name)
+        else:
+            candidates.append(Path.home() / "Android" / "Sdk" / "platform-tools" / executable_name)
         return self._first_existing_file(candidates)
 
     @staticmethod
@@ -634,12 +689,18 @@ class ZhuoruiController:
         configured = config.get("emulator")
         if isinstance(configured, str) and configured.strip():
             candidates.append(Path(os.path.expandvars(configured)))
+        executable_name = "emulator.exe" if os.name == "nt" else "emulator"
+        discovered = shutil.which(executable_name)
+        if discovered:
+            candidates.append(Path(discovered))
         if adb_path:
-            candidates.append(adb_path.parent.parent / "emulator" / "emulator.exe")
+            candidates.append(adb_path.parent.parent / "emulator" / executable_name)
         for environment_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
             sdk = os.environ.get(environment_name)
             if sdk:
-                candidates.append(Path(sdk) / "emulator" / "emulator.exe")
+                candidates.append(Path(sdk) / "emulator" / executable_name)
+        if os.name != "nt":
+            candidates.append(Path.home() / "Android" / "Sdk" / "emulator" / executable_name)
         return self._first_existing_file(candidates)
 
     @staticmethod
@@ -848,7 +909,7 @@ class ZhuoruiController:
             cpu_value = f"{cpu:.0f}%"
         else:
             cpu_level = "under_load"
-            cpu_detail = "Windows CPU counters are unavailable."
+            cpu_detail = "Host CPU counters are unavailable."
             cpu_value = "Unavailable"
         metrics.append(health_metric("machine_cpu", "Machine CPU", cpu_value, cpu_detail, cpu_level))
 
@@ -865,7 +926,7 @@ class ZhuoruiController:
         else:
             memory_level = "under_load"
             memory_value = "Unavailable"
-            memory_detail = "Windows memory counters are unavailable."
+            memory_detail = "Host memory counters are unavailable."
         metrics.append(health_metric("machine_memory", "Machine memory", memory_value, memory_detail, memory_level))
 
         emulator_running = bool(emulator.get("running"))
@@ -1002,20 +1063,18 @@ class ZhuoruiController:
             "interval_seconds": interval_seconds,
         }
 
-    def _powershell_script(self, name: str, timeout: float = 30) -> ActionResult:
-        script_path = self.root / name
+    def _control_script(self, name: str, timeout: float = 30) -> ActionResult:
+        suffix = ".ps1" if os.name == "nt" else ".sh"
+        script_path = self.root / f"{name}{suffix}"
         if not script_path.is_file():
-            return ActionResult(False, f"Required control script is missing: {name}")
-        arguments = [
-            "powershell.exe",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_path),
-        ]
+            return ActionResult(False, f"Required control script is missing: {script_path.name}")
+        if os.name == "nt":
+            arguments = [
+                "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+            ]
+        else:
+            arguments = ["bash", str(script_path)]
         try:
             result = self.control_runner(arguments, cwd=self.root, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1026,13 +1085,13 @@ class ZhuoruiController:
         status = self.script_status()
         if status["running"]:
             return ActionResult(True, f"The Zhuorui listener is already running with PID {status['pid']}.")
-        return self._powershell_script("start_zhuorui_listener.ps1", timeout=30)
+        return self._control_script("start_zhuorui_listener", timeout=30)
 
     def stop_script(self) -> ActionResult:
         status = self.script_status()
         if not status["running"]:
             return ActionResult(True, "The Zhuorui listener is not running.")
-        return self._powershell_script("stop_zhuorui_listener.ps1", timeout=30)
+        return self._control_script("stop_zhuorui_listener", timeout=30)
 
     def _start_emulator(self) -> ActionResult:
         config = self._config()
@@ -1044,7 +1103,7 @@ class ZhuoruiController:
         emulator_path = self._emulator_path(config, adb_path)
         avd = public["avd"]
         if not emulator_path:
-            return ActionResult(False, "emulator.exe was not found. Check the Android SDK installation.")
+            return ActionResult(False, "The Android emulator executable was not found. Check the Android SDK installation.")
         if not avd:
             return ActionResult(False, "No AVD is configured. Add avd to zhuorui_config.json.")
         emulator_accel = str(config.get("emulator_accel") or "auto").strip().lower()
@@ -1071,6 +1130,7 @@ class ZhuoruiController:
                     stderr=subprocess.STDOUT,
                     creationflags=creation_flags,
                     close_fds=True,
+                    start_new_session=os.name != "nt",
                 )
         except OSError as exc:
             return ActionResult(False, f"Could not start the Android emulator: {exc}")
