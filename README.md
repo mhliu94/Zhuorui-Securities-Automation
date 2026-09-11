@@ -102,8 +102,10 @@ Direct query results contain the broker's raw private account fields. The Kafka
 listener maps account, cash and holdings reads to the existing KTrader snapshot
 format. Normal API operations use the encrypted session and HTTPS without UI
 clicks, proxy or emulator calls. After the initial session import, routine API
-password re-login also works without the emulator running. Keep access to the
-emulator for trading-password unlock, phone verification or a manual session import.
+password re-login also works without the emulator running. The listener uses the
+existing `trade_password` setting to unlock trading on demand before dispatching
+an order or cancellation, then verifies the account's authorization. Keep access
+to the emulator for phone verification or a manual session import.
 
 The listener enables automatic login recovery by default through
 `api.auto_login_enabled`. It reuses `login.phone`, `login.password` and

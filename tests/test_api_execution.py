@@ -44,10 +44,14 @@ class RecordingClient(ApiClient):
         self.cancel_error = None
         self.response = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.orders = []
-        self.trade_auth = {"code": "000000", "data": {"account": "synthetic"}}
+        self.headers = {"userid": "synthetic-user"}
+        self.account = {"code": "000000", "data": {"clientId": "synthetic-client"}}
+        self.trade_auth = {"code": "000000", "data": {"accountId": "synthetic-client", "userId": "synthetic-user"}}
 
     def query(self, name):
         self.timeline.append(("query", self.clock.now(), name))
+        if name == "account":
+            return self.account
         if name == "trade-auth":
             return self.trade_auth
         if name == "orders":

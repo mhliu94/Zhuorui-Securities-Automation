@@ -99,7 +99,9 @@ Windows machine.
 Set the new account's login credentials and country calling code correctly.
 Phone verification (`010007`) and other explicit login rejections pause automatic
 attempts for review; transport failures retry after `api.login_retry_seconds`.
-Use the emulator for verification, manual re-import and trading-password unlock.
-Trading-password submission remains unimplemented in the API runtime. Successful
-fills/cancellations and account-specific logout recovery still need controlled
+Use the emulator for verification and manual re-import. Configure `trade_password`
+and install the updated `requirements-api.txt` to enable on-demand API trading
+unlock. Failed unlocks pause further password attempts for that listener instance;
+correct the password or account verification before restarting. Successful
+live unlock, fills/cancellations and account-specific logout recovery still need controlled
 validation. Recovery never replays an earlier order.

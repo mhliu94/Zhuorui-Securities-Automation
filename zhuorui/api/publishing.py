@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import queue
 import threading
+import tempfile
 import time
 
 from .signing import canonical
@@ -19,20 +20,56 @@ class ListenerState:
         self.path = Path(path)
         self.lock = threading.RLock()
         self.values = initial
+        self._write_failed = False
+
+    @staticmethod
+    def _notice(message):
+        try:
+            print(message, flush=True)
+        except OSError:
+            pass  # A status/logging failure must not terminate the listener.
 
     def update(self, **values):
+        """Update memory and attempt an atomic diagnostic snapshot.
+
+        Windows readers can temporarily prevent replacement of an open file.
+        Keep the previous complete snapshot on any filesystem failure and retry
+        the newest values on the next update/heartbeat. Do not sleep while holding
+        this lock: order and session processing share this state.
+        """
         with self.lock:
             self.values.update(values, updated_at=utc_now())
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-            temporary.write_bytes(canonical(self.values))
-            temporary.replace(self.path)
+            payload = canonical(self.values)
+            temporary = None
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="wb", dir=self.path.parent,
+                                                 prefix=self.path.name + ".", suffix=".tmp",
+                                                 delete=False) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(payload)
+                temporary.replace(self.path)
+            except OSError:
+                if not self._write_failed:
+                    self._notice("WARNING: Could not save listener status; keeping the previous snapshot and retrying on the next update.")
+                self._write_failed = True
+                return False
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass  # Only clean up our own temporary file.
+            if self._write_failed:
+                self._notice("Listener status file writes recovered.")
+            self._write_failed = False
+            return True
 
     def holdings_recovered(self, **values):
         with self.lock:
             if self.values.get("last_error") == self.values.get("last_holdings_error"):
                 values["last_error"] = None
-            self.update(**values, last_holdings_error=None)
+            return self.update(**values, last_holdings_error=None)
 
 
 class HoldingsPublisher:

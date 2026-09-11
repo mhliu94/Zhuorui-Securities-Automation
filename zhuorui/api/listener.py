@@ -267,7 +267,7 @@ def run_listener(config_path):
             clients.bootstrap()
             publisher = HoldingsPublisher(config, settings, producer, clients, state)
             publisher.start()
-            executor = CommandExecutor(settings, api_settings, journal, clients, publisher, emit)
+            executor = CommandExecutor(settings, api_settings, journal, clients, publisher, emit, config=config)
             executor.recover_pending_cancellations()
             consumer = KafkaConsumer(settings.command_topic, bootstrap_servers=settings.bootstrap_servers,
                 client_id=settings.client_id, group_id=settings.group_id, auto_offset_reset="latest",

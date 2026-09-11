@@ -20,6 +20,7 @@ from .signing import canonical, signature
 
 QUOTE_PATH = "/as_market/api/stock_price/v1/get_prices"
 LOGIN_PATH = "/as_user/api/user_account/v1/user_login_pwd"
+TRADE_AUTH_PATH = "/as_trade/api/account/v1/auth"
 
 
 def strict_object(pairs):
@@ -76,6 +77,15 @@ class ApiClient:
         return self._request(LOGIN_PATH, {"phone": phone, "phoneArea": phone_area,
             "accountType": 1, "type": 1, "loginPassword": login_password_hash(password)}, login=True)
 
+    def unlock_trading(self, client_id, password):
+        """Authorize the current account; never retry a password submission."""
+        from .passwords import trade_password_ciphertext
+        if not isinstance(client_id, str) or not client_id or client_id != client_id.strip() or len(client_id) > 256:
+            raise ApiError("Account query did not provide a valid trading client ID.")
+        return self._request(TRADE_AUTH_PATH,
+                             {"clientId": client_id, "password": trade_password_ciphertext(password)},
+                             trade_auth=True)
+
     def quantity_for_notional(self, symbol, budget):
         if not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9.=\-]{1,16}", symbol):
             raise ApiError("Invalid US symbol for quantity sizing.")
@@ -114,10 +124,10 @@ class ApiClient:
             raise ApiError("Notional amount is below one share at the reference quote.")
         return quantity
 
-    def _request(self, path, body, *, write=False, login=False):
-        if write and login:
+    def _request(self, path, body, *, write=False, login=False, trade_auth=False):
+        if sum((bool(write), bool(login), bool(trade_auth))) > 1:
             raise ApiError("Unsupported mixed broker operation.")
-        permitted = {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH})
+        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH})
         if path not in permitted:
             raise ApiError("Unsupported broker operation.")
         payload = {**body, "timeStamp": int(self.now() * 1000)}

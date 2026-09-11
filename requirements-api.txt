@@ -1,3 +1,4 @@
 # Direct API runtime. Capture/APK inspection dependencies stay in api_research.
 cryptography==48.0.1
+gmalg==1.1.2
 kafka-python==3.0.7

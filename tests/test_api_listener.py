@@ -111,7 +111,10 @@ class ApiRecordReplayTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.journal = CommandJournal(Path(self.directory.name) / "commands.sqlite3", {"account": "synthetic"})
         self.client, self.holdings, self.emit = Mock(), Mock(), Mock()
-        self.client.query.return_value = {"code": "000000", "data": {"authorized": True}}
+        self.client.headers = {"userid": "synthetic-user"}
+        self.client.query.side_effect = lambda name: {"code": "000000", "data":
+            {"clientId": "synthetic-client"} if name == "account" else
+            {"accountId": "synthetic-client", "userId": "synthetic-user"}}
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.executor = CommandExecutor(SETTINGS, API_SETTINGS, self.journal, lambda: self.client,
                                         self.holdings, self.emit)
@@ -258,7 +261,10 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.clients = Mock()
         self.clients.recovery_needed = False
         self.client = self.clients.return_value
-        self.client.query.return_value = {"code": "000000", "data": {"authorized": True}}
+        self.client.headers = {"userid": "synthetic-user"}
+        self.client.query.side_effect = lambda name: {"code": "000000", "data":
+            {"clientId": "synthetic-client"} if name == "account" else
+            {"accountId": "synthetic-client", "userId": "synthetic-user"}}
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.consumer.poll.return_value = {"unused-partition-key": [record()]}
         self.at_commit = []

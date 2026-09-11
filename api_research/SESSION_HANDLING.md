@@ -59,7 +59,9 @@ login and trading authorization therefore require separate checks.
 The same emulator's password login and trading unlock were captured successfully.
 The password-login MD5 field has now been reproduced from that flow and is used
 by the direct login implementation. Trading-password SM2 transformation has been
-derived, but automatic trading unlock is not implemented. Neither the captured
+derived and automatic trading unlock is now implemented using the shared
+`trade_password` configuration. The new unlock implementation has offline
+validation; no live unlock request has been sent by its tests. Neither captured
 login nor offline recovery tests alone establish end-to-end handling of every
 expired-session, displaced-login or verification response on the live account.
 
@@ -93,8 +95,12 @@ expired-session, displaced-login or verification response on the live account.
    guaranteed while authentication is unavailable; reconcile the original order.
 
 Trading authorization stays separate. A valid ordinary login with locked trading
-requires trading-password unlock in the app, not another password login. This
-runtime does not submit the trading password.
+triggers an on-demand encrypted trading-password request before order/cancellation
+dispatch. The runtime reads the existing `trade_password` setting, sends the
+account's `clientId`, and verifies user/account authorization after the response.
+Failures pause password attempts until the listener restarts or an unlocked
+response is verified. Ordinary login recovery never replays a rejected command
+or resets that pause. See [API recovery](../docs/api.md) for details.
 
 Session exchange is local and protected. Direct import from the supported
 root-readable emulator and capture import are implemented as explicit commands.
@@ -107,7 +113,8 @@ login. Continuous private traffic recording is not needed for API operation.
 
 After initial import, API reads, writes and routine password re-login have no
 emulator dependency. The emulator remains the route for initial device enrollment,
-phone verification, manual session re-import and trading-password unlock. It can
+phone verification and manual session re-import. Routine trading-password unlock
+now uses the API. The emulator can
 be stopped during ordinary API operation; stopping it must not mean signing out
 of the account. Keep the UI listener separate and do not run the same trading
 commands through both backends.

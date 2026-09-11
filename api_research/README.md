@@ -109,7 +109,8 @@ user-assisted validation.
   The latter required preserving the decimal price's trailing zeroes. Signing
   now supports exact `Decimal` values, with five added regression tests. The
   encrypted trading-password field was observed. Its SM2 transformation has
-  since been derived, but automatic trading unlock remains unimplemented.
+  since been derived and is used by the API runtime's on-demand trading unlock.
+  The new implementation has offline validation; live unlock remains unverified.
   No auth or order request was replayed for this capture evidence.
   See [limit-auth-capture-evidence.json](limit-auth-capture-evidence.json).
 - A 140-second TLS-passthrough proxy capture of the original emulator observed
@@ -170,7 +171,8 @@ Relevant request/response classes also remain readable in the APK:
 - `OrderActionAddResponse`: `orderTxnReference` and `riskTypeMsg`.
 - `OrderActionCancelRequest`: `orderId`, `orderTxnReference`, and `remark`.
 - `TradeAuthRequest`: `clientId` and `password`. The SM2 transformation has been
-  derived; API trading-password submission and unlock remain unimplemented.
+  derived; API trading-password submission and verified on-demand unlock are
+  implemented using the shared `trade_password` configuration.
 
 Static header logic includes `token`, `userId`, `deviceId`, device metadata,
 `appVersion`, OS version, and language. The logged-out capture directly confirmed
@@ -328,7 +330,8 @@ the validated, root-readable original emulator. It does not require an initial
 traffic capture on another account using that build. See [verification evidence](emulator-session-evidence.json)
 and [the API guide](../docs/api.md). Automatic same-device password login and live
 order transport are implemented. Execution defaults to enabled, with an explicit
-disabled override available; automatic trading-password unlock remains pending.
+disabled override available; automatic trading-password unlock is implemented
+with offline validation and still needs a controlled live check.
 The storage decoder follows the public [MMKV map format](https://github.com/Tencent/MMKV/blob/master/Core/MiniPBCoder.cpp)
 and [metadata layout](https://github.com/Tencent/MMKV/blob/master/Core/MMKVMetaInfo.hpp),
 with stricter checksum/format rejection for session credentials.

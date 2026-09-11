@@ -6,6 +6,7 @@ import time
 from .commands import CancelCommand, command_fingerprint
 from .errors import ApiError, BrokerRejected, SessionError, OrderOutcomeUnknown
 from .orders import plan_order, plan_cancel
+from .trade_auth import TradeAuthorizer
 
 TERMINAL_STATES = {"8", "6", "F", "5", "G", "9", "J", "FILLED", "CANCELED", "REJECTED", "DONE_FOR_DAY"}
 PENDING_CANCEL_STATES = {"3", "4", "PENDING_CANCEL"}
@@ -43,16 +44,16 @@ def cancel_references(response, command):
 
 
 class CommandExecutor:
-    def __init__(self, settings, api_settings, journal, client_provider, holdings, emit, *, now=time.monotonic, wall=time.time, sleep=time.sleep):
+    def __init__(self, settings, api_settings, journal, client_provider, holdings, emit, *, config=None, now=time.monotonic, wall=time.time, sleep=time.sleep):
         self.settings, self.api_settings, self.journal = settings, api_settings, journal
         self.client_provider, self.holdings, self.emit = client_provider, holdings, emit
         self.now, self.wall, self.sleep = now, wall, sleep
+        self.trade_authorizer = TradeAuthorizer(config or {})
 
     def preflight(self, client):
-        client.query("account")
+        account = client.query("account")
         auth = client.query("trade-auth")
-        if not isinstance(auth.get("data"), dict) or not auth["data"]:
-            raise ApiError("Trading authorization is locked. Unlock it in the same emulator, then send a new command.")
+        self.trade_authorizer.ensure(client, account, auth)
 
     def _report_session_error(self, error, client):
         reporter = getattr(self.client_provider, "report_error", None)

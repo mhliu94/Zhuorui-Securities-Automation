@@ -297,10 +297,36 @@ performs no password login, root enabling, emulator restart or broker-write
 retry. Its default is false. Leave it false for routine operation with the
 emulator stopped; direct password recovery does not depend on it.
 
-Trading-password authorization is separate from ordinary login. Unlock trading
-in the app if required; automatic trading-password submission is not implemented.
-The SM2 transformation has been derived from the app, but the runtime does not
-use it. No full account re-login is performed merely because trading is locked.
+The listener status JSON is a diagnostic snapshot. If Windows temporarily blocks
+replacement, or another filesystem error prevents saving it, the listener keeps
+the previous complete file and retains current values in memory. It logs one
+warning per outage and retries the latest values on subsequent updates, including
+the 15-second heartbeat, without sleeping in order processing. Recovery is logged.
+The monitor's existing overdue-status indicator flags a prolonged outage.
+This handling applies only to the status snapshot; order-journal and encrypted
+session/recovery persistence failures retain their existing error handling.
+
+Trading-password authorization is separate from ordinary login. Before an order
+or cancellation, the listener checks account and trading authorization. If locked,
+it uses the existing `trade_password` setting (also accepting the UI aliases
+`trade.password` and `password`) to call `/as_trade/api/account/v1/auth`.
+The request uses the account response's `clientId`, a fresh timestamp/signature,
+and randomized SM2/SM3 encryption matching Android 3.1.5: lowercase hex
+C1 || C3 || C2 without the initial 04 point byte. Install the updated
+`requirements-api.txt` for the pinned `gmalg` dependency.
+
+The listener verifies the unlock response's user and re-queries trading
+authorization, requiring both user and account to match before dispatch. A failed
+or uncertain unlock rejects the command and pauses further password attempts for
+that listener instance. Correct the password or account verification before
+restarting; a verified unlocked response also clears the pause. Ordinary login
+recovery does not clear the pause. No rejected order is automatically replayed.
+Already-unlocked sessions and holdings queries do not submit the trading password.
+No full account re-login occurs merely because trading is locked.
+
+Offline encryption vectors, request signing, identity checks, failed-attempt
+handling, and order/cancellation integration are tested. This implementation has
+not yet been validated with a live trading-password request.
 
 Captured Market/Limit submissions and cancellation requests establish wire
 formats. The observed orders were rejected outside the trading session with
