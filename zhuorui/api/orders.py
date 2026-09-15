@@ -2,13 +2,13 @@
 
 Planning has no account, signing, network, Kafka or Android dependencies.
 """
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, localcontext
 import math
 import re
 from .errors import ApiError
 
 
-def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=False, cancel_after=1):
+def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=None, cancel_after=1):
     if not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z0-9.=\-]{1,16}", symbol):
         raise ApiError("Invalid US stock symbol.")
     if side not in {"buy", "sell"}:
@@ -17,6 +17,10 @@ def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=False
         raise ApiError("Quantity must be a positive whole number of shares.")
     if kind not in {"market", "limit", "timed-cancel"}:
         raise ApiError("Order type must be market, limit or timed-cancel.")
+    if allow_pre_post is None:
+        allow_pre_post = kind != "market"
+    if not isinstance(allow_pre_post, bool):
+        raise ApiError("allow_pre_post must be a boolean or omitted.")
     payload = {"volumeMultiple": 1, "entrustProp": "MO" if kind == "market" else "LO",
                "code": symbol.upper(), "entrustBs": "1" if side == "buy" else "2", "entrustAmount": quantity,
                "apStatus": 0, "ts": "US"}
@@ -30,6 +34,19 @@ def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=False
             raise ApiError("Limit and timed-cancel plans require a positive decimal price.") from None
         if not value.is_finite() or value <= 0:
             raise ApiError("Price must be a finite positive decimal.")
+        parts = value.as_tuple()
+        if len(parts.digits) > 128 or abs(parts.exponent) > 100:
+            raise ApiError("Price exceeds supported numeric precision.")
+        # Apply the user's cent policy before signing the exact outgoing body.
+        # Use enough precision so the ambient Decimal context cannot alter it.
+        with localcontext() as context:
+            context.prec = max(28, len(parts.digits) + max(parts.exponent, 0) + 3)
+            value = value.quantize(Decimal("0.01"),
+                                   rounding=ROUND_CEILING if side == "buy" else ROUND_FLOOR)
+        if value <= 0:
+            raise ApiError("Sell limit price rounds down to zero cents; no order can be sent.")
+        # This is the app's captured regular + pre/post limit instruction.
+        # sessionType is a response field, not a captured submission parameter.
         payload.update(entrustPrice=value, allowPrePost="Y" if allow_pre_post else "N")
     plan = {"mode": "offline_plan", "path": "/as_trade/api/order/v1/entrust_enter",
             "unsigned_body": payload, "request_sent": False}

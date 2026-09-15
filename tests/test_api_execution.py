@@ -132,10 +132,11 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.holdings.requests, ["order_submission"] * 2)
         self.assertEqual(self.clock.sleeps, [])
 
-    def test_limit_preserves_decimal_and_requests_holdings(self):
+    def test_limit_uses_cents_and_requests_holdings(self):
         self.executor.execute(trade(kind="limit"))
         self.assertEqual(self.client.calls[0][2]["entrustProp"], "LO")
-        self.assertEqual(str(self.client.calls[0][2]["entrustPrice"]), "12.3400")
+        self.assertEqual(str(self.client.calls[0][2]["entrustPrice"]), "12.34")
+        self.assertEqual(self.client.calls[0][2]["allowPrePost"], "Y")
         self.assertEqual(self.holdings.requests, ["order_submission"])
         self.assertEqual(self.events[-1][0], "submitted")
 

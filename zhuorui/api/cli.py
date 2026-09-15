@@ -33,7 +33,8 @@ def parser():
     order.add_argument("quantity", type=int)
     order.add_argument("--type", choices=["market", "limit", "timed-cancel"], default="market")
     order.add_argument("--price")
-    order.add_argument("--allow-pre-post", action="store_true")
+    order.add_argument("--allow-pre-post", action=argparse.BooleanOptionalAction, default=None,
+                       help="Limit orders default to pre/post enabled; --no-allow-pre-post restricts them to regular hours")
     cancel = commands.add_parser("plan-cancel", parents=[shared], help="Create an unsigned cancellation plan; sends nothing")
     cancel.add_argument("order_reference")
     return main

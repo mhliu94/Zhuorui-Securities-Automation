@@ -201,8 +201,22 @@ Examples of accepted shapes; replace IDs and order fields before use:
 
 Buy and Sell Market commands send native `entrustProp: MO`, omitting
 `entrustPrice`, `allowPrePost` and native FOK flags. A Market command containing
-a price is rejected. Limit sends `LO`, preserves decimal price precision and
-accepts `allow_pre_post: true` when requested. Shares must be positive integers.
+a price is rejected. Limit sends `LO` and rounds its price to cents before signing:
+Buy rounds up and Sell rounds down (for example, `322.1064` becomes `322.11` for
+Buy or `322.10` for Sell). Exact-cent prices retain their value. A Sell price that
+rounds to zero is rejected locally. This also applies to timed-cancel Limit orders.
+The journal keeps the original requested price for command identity and auditing.
+
+Limit and timed-cancel Limit orders default to `allowPrePost: "Y"`, the app's
+captured instruction permitting regular and pre/post trading. An explicit
+`allow_pre_post: false` (or equivalent alias) sends `"N"` for regular hours only.
+The offline CLI follows the same defaults; `--no-allow-pre-post` selects regular
+hours only. `sessionType` is an order-response field, not a captured submission
+parameter. Native Market orders retain the app's `MO` request without a price
+or extended-hours override. Extended-hours native Market submission is not
+verified or implemented. A Market order submitted before regular hours may remain pending with the
+broker until the market opens. Check its broker status before submitting again.
+Shares must be positive integers.
 
 Market also accepts `notional_usd` without shares. The client requests a fresh,
 real-time quote for the exact US symbol and rounds down to whole shares. Delayed,
@@ -305,6 +319,26 @@ the 15-second heartbeat, without sleeping in order processing. Recovery is logge
 The monitor's existing overdue-status indicator flags a prolonged outage.
 This handling applies only to the status snapshot; order-journal and encrypted
 session/recovery persistence failures retain their existing error handling.
+
+Runtime diagnostics are written immediately to the current listener's
+`logs/zhuorui_api_listener_*.out.log`; its exact path is recorded in
+`zhuorui_api_listener.current.json`. Each diagnostic includes a UTC timestamp,
+severity, process ID and thread. Logs cover startup and effective trading mode,
+publication starts and acknowledged deliveries, login recovery, command receipt
+and Kafka offset commits, and shutdown reasons and cleanup failures. A heartbeat
+every minute records uptime, session status and the latest confirmed publication;
+the status-file heartbeat remains every 15 seconds. Failures identify the stage
+(for example `cash_query`, `kafka_ack` or `kafka_commit`), exception types and code
+locations. Credentials, raw broker responses, account contents and exception
+messages are omitted. Logging failures do not interrupt account operations.
+
+Control Room writes its lifecycle, control actions, listener state changes and
+minute heartbeats to `logs/zhuorui_monitor_*.out.log`. Diagnostic errors also go
+to these stdout logs; check the corresponding stderr logs for other runtime
+output. A forced termination or power loss cannot write its own shutdown reason.
+On the next API start, an unfinished prior status snapshot produces a warning
+with the previous PID and last update time; it does not assert a cause. These
+logs add evidence, not automatic restart behavior.
 
 Trading-password authorization is separate from ordinary login. Before an order
 or cancellation, the listener checks account and trading authorization. If locked,

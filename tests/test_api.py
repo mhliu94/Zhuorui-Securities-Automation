@@ -90,9 +90,9 @@ class OrderPlanTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             plan_order("BILI", "buy", 1, "market", price="25")
 
-    def test_limit_decimal_scale_survives_serialization(self):
+    def test_limit_price_is_serialized_in_cents(self):
         plan = plan_order("BILI", "buy", 1, "limit", price="25.1000", allow_pre_post=True)
-        self.assertIn(b'"entrustPrice":25.1000', canonical(plan))
+        self.assertIn(b'"entrustPrice":25.10', canonical(plan))
         self.assertEqual(plan["unsigned_body"]["allowPrePost"], "Y")
 
     def test_timed_cancel_is_limit_with_dispatch_deadline_and_partial_fills(self):

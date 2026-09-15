@@ -60,7 +60,7 @@ class ApiClient:
             raise ApiError("This runtime permits only named account queries.")
         return self._request(READ_PATHS[name], {})
 
-    def submit_order(self, symbol, side, quantity, kind, *, price=None, allow_pre_post=False):
+    def submit_order(self, symbol, side, quantity, kind, *, price=None, allow_pre_post=None):
         plan = plan_order(symbol, side, quantity, kind, price=price, allow_pre_post=allow_pre_post)
         return self._request(plan["path"], plan["unsigned_body"], write=True)
 

@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from zhuorui.common.config import config_bool, ZhuoruiAutomationError
+from zhuorui.common.runtime_logging import log_event
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1428,7 +1429,13 @@ class ZhuoruiController:
         if not self._action_lock.acquire(blocking=False):
             return ActionResult(False, "Another control action is still in progress.")
         try:
-            return handler()
+            log_event("monitor.controls", "Control action started.", action=action, backend=self.backend)
+            result = handler()
+            log_event("monitor.controls", "Control action finished.", action=action, ok=result.ok)
+            return result
+        except Exception as exc:
+            log_event("monitor.controls", "Control action failed.", level="ERROR", error=exc, action=action)
+            raise
         finally:
             self._action_lock.release()
 
@@ -1443,12 +1450,14 @@ class StatusMonitor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._restart_thread: threading.Thread | None = None
+        self._next_log_heartbeat = 0.0
 
     def refresh(self) -> dict[str, Any]:
         with self._refresh_lock:
             try:
                 status = self.controller.collect_status(self.interval_seconds)
             except Exception as exc:  # Keep the web server alive if an external tool fails unexpectedly.
+                log_event("monitor.status", "Listener status check failed.", level="ERROR", error=exc)
                 checked_at = utc_now()
                 status = {
                     "account": self.controller.public_config(),
@@ -1459,6 +1468,17 @@ class StatusMonitor:
                     "interval_seconds": self.interval_seconds,
                 }
             with self._lock:
+                script = status.get("script", {})
+                previous = self._status.get("script", {})
+                keys = ("state", "running", "pid", "session_status")
+                changed = any(script.get(key) != previous.get(key) for key in keys)
+                if changed or time.monotonic() >= self._next_log_heartbeat:
+                    log_event("monitor.status", "Listener status changed." if changed else "Control Room heartbeat.",
+                              level="INFO" if script.get("state") == "running" else "WARNING",
+                              **{key: script.get(key) for key in keys},
+                              last_holdings_publish=script.get("last_holdings_publish"),
+                              error_present=bool(script.get("last_error")))
+                    self._next_log_heartbeat = time.monotonic() + 60
                 self._status = status
             return status
 
@@ -1631,10 +1651,8 @@ class RedirectRequestHandler(BaseHTTPRequestHandler):
     server_version = "ZhuoruiRedirect/1.0"
 
     def log_message(self, format_string: str, *args: Any) -> None:
-        sys.stdout.write(
-            f"{self.log_date_time_string()} {self.client_address[0]} redirect {format_string % args}\n"
-        )
-        sys.stdout.flush()
+        log_event("monitor.http_redirect", "HTTP request log.",
+                  client=self.client_address[0], detail=format_string % args)
 
     def _redirect(self) -> None:
         port = "" if self.server.https_port == 443 else f":{self.server.https_port}"
@@ -1660,10 +1678,8 @@ class ZhuoruiRequestHandler(BaseHTTPRequestHandler):
     server_version = "ZhuoruiMonitor/2.0"
 
     def log_message(self, format_string: str, *args: Any) -> None:
-        sys.stdout.write(
-            f"{self.log_date_time_string()} {self.client_address[0]} {format_string % args}\n"
-        )
-        sys.stdout.flush()
+        log_event("monitor.http", "HTTP request log.",
+                  client=self.client_address[0], detail=format_string % args)
 
     def _send_security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -2000,6 +2016,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     controller = ZhuoruiController(PROJECT_ROOT, backend="api" if os.name == "nt" else "ui")
+    log_event("monitor.lifecycle", "Control Room starting.", parent_pid=os.getppid(),
+              backend=controller.backend, port=args.port, interval_seconds=args.interval)
     monitor = StatusMonitor(controller, args.interval)
     redirect_server: RedirectServer | None = None
     redirect_thread: threading.Thread | None = None
@@ -2021,7 +2039,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ssl.SSLError) as exc:
         if "server" in locals():
             server.server_close()
-        print(f"Could not start dashboard on {args.host}:{args.port}: {exc}", file=sys.stderr)
+        log_event("monitor.lifecycle", "Control Room startup failed.", level="ERROR", error=exc, port=args.port)
         return 1
 
     monitor.start()
@@ -2035,18 +2053,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         redirect_thread.start()
     scheme = "http" if args.allow_http else "https"
     display_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Zhuorui Control Room: {scheme}://{display_host}:{args.port}")
-    print(f"Authentication required. Checking listener and emulator every {args.interval} seconds.")
+    log_event("monitor.lifecycle", f"Zhuorui Control Room: {scheme}://{display_host}:{args.port}")
+    log_event("monitor.lifecycle", f"Authentication required. Checking listener and emulator every {args.interval} seconds.")
     if redirect_server:
-        print(
+        log_event("monitor.lifecycle",
             f"HTTP port {args.redirect_http_port} redirects to "
             f"https://{args.public_host}{'' if args.port == 443 else f':{args.port}'}/"
         )
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
-        pass
+        log_event("monitor.lifecycle", "Keyboard interrupt received; stopping Control Room.")
+    except Exception as exc:
+        log_event("monitor.lifecycle", "Control Room serving failed.", level="ERROR", error=exc)
+        raise
     finally:
+        log_event("monitor.lifecycle", "Control Room shutdown started.")
         server.shutdown()
         server.server_close()
         if redirect_server:
@@ -2055,6 +2077,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if redirect_thread:
             redirect_thread.join(timeout=5)
         monitor.stop()
+        log_event("monitor.lifecycle", "Control Room shutdown completed.")
     return 0
 
 

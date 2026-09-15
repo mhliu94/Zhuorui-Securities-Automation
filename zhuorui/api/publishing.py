@@ -9,6 +9,7 @@ import time
 
 from .signing import canonical
 from .errors import ApiError
+from zhuorui.common.runtime_logging import log_event
 
 
 def utc_now():
@@ -24,10 +25,7 @@ class ListenerState:
 
     @staticmethod
     def _notice(message):
-        try:
-            print(message, flush=True)
-        except OSError:
-            pass  # A status/logging failure must not terminate the listener.
+        log_event("api.state", message, level="WARNING" if message.startswith("WARNING:") else "INFO")
 
     def update(self, **values):
         """Update memory and attempt an atomic diagnostic snapshot.
@@ -79,6 +77,7 @@ class HoldingsPublisher:
         self.requests = queue.Queue()
         self.thread = threading.Thread(target=self.run, name="api-holdings-publisher", daemon=False)
         self.published = 0
+        self.failures = 0
 
     def start(self):
         self.thread.start()
@@ -91,26 +90,43 @@ class HoldingsPublisher:
         from .snapshot import account_snapshot
         start = self.now()
         client = None
+        stage = "session"
+        log_event("api.publisher", "Account publication started.", reason=reason)
         try:
             client = self.client_provider()
+            stage = "account_query"
             account = client.query("account")
+            stage = "cash_query"
             cash = client.query("cash")
+            stage = "holdings_query"
             holdings = client.query("holdings")
+            stage = "snapshot"
             snapshot = account_snapshot(self.config, holdings, cash, account)
             snapshot["trading_enabled"] = self.settings.live_orders_enabled
             elapsed = self.now() - start
-            print(f"Holdings query completed in {elapsed:.3f} seconds.", flush=True)
-            self.producer.send(self.settings.holdings_topic, snapshot,
-                               key=snapshot["account_id"].encode("utf8")).get(timeout=10)
+            log_event("api.publisher", f"Holdings query completed in {elapsed:.3f} seconds.")
+            stage = "kafka_send"
+            future = self.producer.send(self.settings.holdings_topic, snapshot,
+                                        key=snapshot["account_id"].encode("utf8"))
+            stage = "kafka_ack"
+            future.get(timeout=10)
             self.published += 1
+            stage = "record_success"
             values = dict(last_holdings_publish=utc_now(), holdings_publish_count=self.published,
                           last_holdings_reason=reason)
             if hasattr(self.client_provider, "report_success"):
                 self.client_provider.report_success(client, **values)
             else:
                 self.state.holdings_recovered(**values, session_status="valid")
-            print("Published account details message.", flush=True)
+            log_event("api.publisher", "Published account details message.", reason=reason,
+                      published=self.published, recovered_after_failures=self.failures,
+                      total_seconds=round(self.now() - start, 3))
+            self.failures = 0
         except Exception as exc:
+            self.failures += 1
+            log_event("api.publisher", "Account publication failed.", level="ERROR", error=exc,
+                      stage=stage, reason=reason, consecutive_failures=self.failures,
+                      elapsed_seconds=round(self.now() - start, 3))
             message = str(exc) if isinstance(exc, ApiError) else "Holdings query/publication failed; check the broker session and Kafka connection."
             if hasattr(self.client_provider, "report_error"):
                 if self.client_provider.report_error(exc, client=client) is False:
@@ -118,9 +134,16 @@ class HoldingsPublisher:
                 if hasattr(self.client_provider, "recovery_message"):
                     message = self.client_provider.recovery_message() or message
             self.state.update(last_holdings_error=message, last_error=message, last_holdings_attempt=utc_now())
-            print(f"ERROR publishing holdings: {message}", flush=True)
 
     def run(self):
+        try:
+            self._run()
+        except Exception as exc:
+            # The consumer detects the dead worker and stops command processing.
+            # Avoid threading's default traceback, which includes raw messages.
+            log_event("api.publisher", "Publisher worker exited unexpectedly.", level="ERROR", error=exc)
+
+    def _run(self):
         due = self.now()
         while True:
             wait = max(0, due - self.now())
@@ -129,6 +152,7 @@ class HoldingsPublisher:
             except queue.Empty:
                 reason = "periodic"
             if reason is None:
+                log_event("api.publisher", "Publisher stopped after draining its queue.", published=self.published)
                 return
             self.publish(reason)
             if reason == "periodic":

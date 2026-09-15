@@ -315,8 +315,9 @@ class ApiListenerLifecycleTests(unittest.TestCase):
 
     def test_commit_failure_leaves_submission_durable_and_still_cleans_up(self):
         self.consumer.commit.side_effect = RuntimeError("synthetic commit failure")
-        with self.assertRaises(ApiError):
+        with patch("zhuorui.api.listener.log_event") as log, self.assertRaises(ApiError):
             self.run_offline()
+        self.assertTrue(any(call.kwargs.get("stage") == "kafka_commit" for call in log.call_args_list))
         with closing(sqlite3.connect(self.settings.journal_file)) as db:
             state = db.execute("SELECT state FROM commands WHERE id='producer-id'").fetchone()[0]
         self.assertEqual(state, "submitted")
@@ -324,6 +325,27 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.publisher.close.assert_called_once()
         self.producer.close.assert_called_once()
         self.assertFalse(json.loads(self.settings.state_file.read_text())["running"])
+
+    def test_session_setup_failure_records_stage_and_closes_journal(self):
+        opened = []
+        def open_journal(*args):
+            journal = CommandJournal(*args)
+            opened.append(journal)
+            return journal
+        with patch("zhuorui.api.listener.ClientProvider", side_effect=SessionError("invalid saved state")), \
+             patch("zhuorui.api.listener.load_settings", return_value=(CONFIG, API_SETTINGS)), \
+             patch("zhuorui.api.listener.load_listener_settings", return_value=self.settings), \
+             patch("zhuorui.api.listener.log_event") as log, \
+             patch("zhuorui.api.listener.CommandJournal", side_effect=open_journal):
+            with self.assertRaises(ApiError):
+                run_listener(Path(self.directory.name) / "synthetic-config.json")
+        self.assertTrue(any(call.kwargs.get("stage") == "session_provider" for call in log.call_args_list))
+        state = json.loads(self.settings.state_file.read_text())
+        self.assertFalse(state["running"])
+        self.assertEqual(state["shutdown_reason"], "runtime_error")
+        self.assertIn("stopped_at", state)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].db.execute("SELECT 1")
 
     def test_consumer_close_failure_does_not_skip_other_cleanup(self):
         self.consumer.close.side_effect = RuntimeError("synthetic close failure")

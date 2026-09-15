@@ -82,7 +82,7 @@ class ApiWriteTransportTests(unittest.TestCase):
                 KEY.public_key().verify(base64.b64decode(encoded_signature), canonical(payload),
                                         padding.PKCS1v15(), hashes.SHA1())
 
-    def test_limit_and_timed_cancel_both_use_lo_with_exact_price(self):
+    def test_limit_and_timed_cancel_both_use_lo_with_cent_price(self):
         for kind in ("limit", "timed-cancel"):
             with self.subTest(kind=kind):
                 client, opener = self.client()
@@ -92,7 +92,7 @@ class ApiWriteTransportTests(unittest.TestCase):
                 self.assertEqual(payload["entrustProp"], "LO")
                 self.assertEqual(payload["entrustBs"], "2")
                 self.assertEqual(payload["allowPrePost"], "Y")
-                self.assertIn(b'"entrustPrice":25.1000', body)
+                self.assertIn(b'"entrustPrice":25.10', body)
                 self.assertNotIn("timeInForce", payload)
                 self.assertNotIn(b'"FOK"', body)
 

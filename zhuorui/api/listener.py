@@ -18,6 +18,7 @@ from .publishing import HoldingsPublisher, ListenerState, utc_now
 from .session import binding, load_session
 from .signing import canonical
 from .recovery import RecoverySchedule, BEIJING
+from zhuorui.common.runtime_logging import log_event
 
 
 class ClientProvider:
@@ -114,6 +115,9 @@ class ClientProvider:
                 if self.schedule.observe_logout(self.wall(), reason):
                     self.schedule_generation = self.session.get("generation") if self.session else None
                     self._persist()
+                    log_event("api.session", "Broker session needs recovery.", level="WARNING",
+                              reason=reason, login_due_epoch=self.schedule.due_at,
+                              auto_login_enabled=self.settings.auto_login_enabled)
                 self.recovery_needed = True
                 self.state.update(session_status="logged_in_elsewhere" if self.displaced else "invalid")
                 self._recovery_state()
@@ -172,21 +176,25 @@ class ClientProvider:
             self.state.update(session_status="logging_in")
             self._recovery_state()
             previous = self.session
+            log_event("api.session", "Automatic password login started.", attempt=self.schedule.attempts)
         try:
             session = password_login(self.config, self.api_settings, previous, now=self.wall)
         except LoginBlocked as exc:
+            log_event("api.session", "Automatic login rejected; attempts paused.", level="ERROR", error=exc)
             with self.lock:
                 self.schedule.failed(self.wall(), blocked_reason="login_rejected")
                 self._persist()
                 self.state.update(session_status="login_blocked", last_error=str(exc),
                                   last_holdings_error=str(exc), login_blocked_reason="login_rejected")
             return False
-        except (ApiError, OSError):
+        except (ApiError, OSError) as exc:
             with self.lock:
                 self.schedule.failed(self.wall())
                 self._persist()
                 self.state.update(session_status="login_retry_wait")
                 self._recovery_state()
+                log_event("api.session", "Automatic login failed; retry scheduled.", level="WARNING",
+                          error=exc, login_due_epoch=self.schedule.due_at)
             return False
         with self.lock:
             self.session = session
@@ -199,7 +207,7 @@ class ClientProvider:
             self.state.update(session_status="login_succeeded", last_error=None, last_holdings_error=None,
                               logout_detected_at=None, login_due_at=None, login_blocked_reason=None,
                               last_login_at=utc_now(), login_attempts=0)
-        print("Automatic password login succeeded; account publication will refresh immediately.", flush=True)
+        log_event("api.session", "Automatic password login succeeded; account publication will refresh immediately.")
         return True
 
 
@@ -223,6 +231,7 @@ def handle_record(record, config, settings, executor, emit):
         command = parse_command(payload, config, message_id=message_id, server_id=settings.server_id)
         if command is None:
             return
+        log_event("api.commands", "Matching command received.", partition=record.partition, offset=record.offset)
         stamp = getattr(record, "timestamp", None)
         if not isinstance(stamp, (int, float)) or isinstance(stamp, bool) or stamp <= 0:
             raise ApiError("Kafka command has no trustworthy timestamp; it will not be executed.")
@@ -232,7 +241,34 @@ def handle_record(record, config, settings, executor, emit):
         emit(command, "rejected", str(exc), command_id=command.command_id if command else message_id)
 
 
+def log_previous_run(state_path):
+    try:
+        previous = json.loads(state_path.read_text(encoding="utf8"))
+        if not isinstance(previous, dict) or previous.get("running") is not True:
+            return
+        stamp = previous.get("updated_at")
+        last_seen = datetime.fromisoformat(stamp).isoformat() if isinstance(stamp, str) else None
+        previous_pid = previous.get("pid")
+        log_event("api.lifecycle", "Previous run has no completed shutdown record; termination cause is unknown.",
+                  level="WARNING", previous_pid=previous_pid if isinstance(previous_pid, int) else None,
+                  previous_updated_at=last_seen)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        log_event("api.lifecycle", "Previous listener status could not be read.", level="WARNING", error=exc)
+
+
 def run_listener(config_path):
+    log_event("api.lifecycle", "API listener starting.", parent_pid=os.getppid())
+    try:
+        return _run_listener(config_path)
+    except Exception as exc:
+        # Includes configuration, lock and session setup failures before the loop.
+        log_event("api.lifecycle", "API listener exited with an error.", level="ERROR", error=exc)
+        raise
+
+
+def _run_listener(config_path):
     from kafka import KafkaConsumer, KafkaProducer
     from kafka.structs import TopicPartition, OffsetAndMetadata
 
@@ -245,12 +281,21 @@ def run_listener(config_path):
                           last_holdings_publish=None, last_error=None)
     lock_file = settings.journal_file.with_suffix(settings.journal_file.suffix + ".lock")
     with InstanceLock(lock_file):
+        log_previous_run(settings.state_file)
         settings.stop_file.unlink(missing_ok=True)
         state.update(pid=os.getpid())
-        journal = CommandJournal(settings.journal_file, binding(config))
-        clients = ClientProvider(config_path, config, api_settings, settings, state)
-        producer = consumer = publisher = None
+        journal = producer = consumer = publisher = None
+        stage, shutdown_reason = "journal_open", "stop_request"
+        started = time.monotonic()
         try:
+            log_event("api.lifecycle", "Listener configuration loaded.",
+                      live_orders_enabled=settings.live_orders_enabled,
+                      holdings_interval_seconds=settings.holdings_interval_seconds)
+            journal = CommandJournal(settings.journal_file, binding(config))
+            stage = "session_provider"
+            clients = ClientProvider(config_path, config, api_settings, settings, state)
+            stage = "kafka_producer_connect"
+            log_event("api.kafka", "Connecting Kafka producer.")
             producer = KafkaProducer(bootstrap_servers=settings.bootstrap_servers, client_id=settings.client_id,
                 value_serializer=canonical, acks="all", retries=3, max_block_ms=10000,
                 request_timeout_ms=10000, bootstrap_timeout_ms=10000)
@@ -258,28 +303,39 @@ def run_listener(config_path):
             # commands, so a controller never mistakes a received command for a fill.
             def emit(command, status, message, **extra):
                 event = status_event(settings, config, command, status, message, **extra)
+                delivered = False
                 try:
                     producer.send(settings.order_status_topic, event,
                                   key=str(event.get("command_id", settings.server_id)).encode()).get(timeout=10)
-                except Exception:
+                    delivered = True
+                except Exception as exc:
                     state.update(last_error="Could not publish a command result to Kafka; inspect the local journal.")
-                print(f"API command {status}: {message}", flush=True)
+                    log_event("api.kafka", "Command result publication failed; inspect the journal.",
+                              level="ERROR", error=exc, status=status)
+                log_event("api.commands", "Command result recorded.", status=status, kafka_delivered=delivered)
+            stage = "session_bootstrap"
             clients.bootstrap()
             publisher = HoldingsPublisher(config, settings, producer, clients, state)
             publisher.start()
             executor = CommandExecutor(settings, api_settings, journal, clients, publisher, emit, config=config)
+            stage = "pending_cancellation_recovery"
             executor.recover_pending_cancellations()
+            stage = "kafka_consumer_connect"
+            log_event("api.kafka", "Connecting Kafka command consumer.")
             consumer = KafkaConsumer(settings.command_topic, bootstrap_servers=settings.bootstrap_servers,
                 client_id=settings.client_id, group_id=settings.group_id, auto_offset_reset="latest",
                 enable_auto_commit=False, max_poll_records=1, max_poll_interval_ms=300000,
                 request_timeout_ms=40000, session_timeout_ms=30000, bootstrap_timeout_ms=10000)
             state.update(kafka_connected=True)
-            print(f"Zhuorui API server {settings.server_id} consuming commands and publishing holdings every {settings.holdings_interval_seconds:g} seconds.", flush=True)
-            print("Live order execution is " + ("ENABLED." if settings.live_orders_enabled else "DISABLED; command receipt/validation and holdings publication are active."), flush=True)
+            log_event("api.lifecycle", "API listener ready; Kafka consumer initialized.",
+                      live_orders_enabled=settings.live_orders_enabled)
             next_heartbeat = time.monotonic()
+            next_log_heartbeat = next_heartbeat
             while not settings.stop_file.exists():
+                stage = "login_recovery"
                 if clients.recover():
                     publisher.request("login_recovery")
+                stage = "kafka_poll"
                 records = consumer.poll(timeout_ms=max(1, int(settings.poll_seconds * 1000)), max_records=1)
                 if not publisher.thread.is_alive():
                     raise ApiError("Holdings publisher stopped unexpectedly; order processing has been stopped.")
@@ -287,29 +343,50 @@ def run_listener(config_path):
                     for record in messages:
                         if settings.stop_file.exists():
                             break
+                        stage = "command_processing"
                         handle_record(record, config, settings, executor, emit)
                         # Journal is committed before this offset. Redelivery is
                         # safe even if this commit fails or the process crashes.
+                        stage = "kafka_commit"
                         consumer.commit({TopicPartition(record.topic, record.partition): OffsetAndMetadata(record.offset + 1)})
+                        log_event("api.commands", "Kafka command offset committed.",
+                                  partition=record.partition, offset=record.offset)
                 if time.monotonic() >= next_heartbeat:
+                    stage = "heartbeat"
                     state.update(kafka_connected=True, unresolved_submissions=len(journal.unresolved()))
                     next_heartbeat = time.monotonic() + 15
+                    if time.monotonic() >= next_log_heartbeat:
+                        with state.lock:
+                            snapshot = dict(state.values)
+                        log_event("api.lifecycle", "Listener heartbeat.", uptime_seconds=round(time.monotonic() - started),
+                                  session_status=snapshot.get("session_status"),
+                                  last_holdings_publish=snapshot.get("last_holdings_publish"),
+                                  published=snapshot.get("holdings_publish_count", 0),
+                                  unresolved_submissions=snapshot.get("unresolved_submissions"),
+                                  error_present=bool(snapshot.get("last_error")),
+                                  publisher_alive=publisher.thread.is_alive())
+                        next_log_heartbeat = time.monotonic() + 60
                     if clients.recovery_needed and clients.schedule.detected_at is None:
                         clients.refresh_from_emulator()
-            print("Stopping API listener after the active command and queued holdings publications finish.", flush=True)
+            log_event("api.lifecycle", "Stop file observed; finishing queued holdings publications.")
         except KeyboardInterrupt:
-            print("Stopping Zhuorui API listener.", flush=True)
+            shutdown_reason = "keyboard_interrupt"
+            log_event("api.lifecycle", "Keyboard interrupt received; stopping listener.")
         except Exception as exc:
+            shutdown_reason = "runtime_error"
+            log_event("api.lifecycle", "Listener operation failed; shutting down.", level="ERROR", error=exc, stage=stage)
             message = str(exc) if isinstance(exc, ApiError) else f"API listener stopped after a Kafka/runtime error ({type(exc).__name__}); inspect the local journal before restart."
             state.update(last_error=message)
             raise ApiError(message) from None
         finally:
+            log_event("api.lifecycle", "Listener shutdown started.", reason=shutdown_reason)
             cleanup_errors = []
             def cleanup(label, operation):
                 try:
                     operation()
-                except Exception:
+                except Exception as exc:
                     cleanup_errors.append(label)
+                    log_event("api.lifecycle", "Shutdown cleanup failed.", level="ERROR", error=exc, stage=label)
             if consumer is not None:
                 cleanup("consumer", lambda: consumer.close(autocommit=False, timeout_ms=10000))
             if publisher is not None:
@@ -322,7 +399,10 @@ def run_listener(config_path):
             if producer is not None:
                 cleanup("producer flush", lambda: producer.flush(timeout=10))
                 cleanup("producer close", lambda: producer.close(timeout=10))
-            cleanup("journal", journal.close)
+            if journal is not None:
+                cleanup("journal", journal.close)
             state.update(running=False, kafka_connected=False,
-                         shutdown_errors=cleanup_errors)
+                         shutdown_errors=cleanup_errors, shutdown_reason=shutdown_reason, stopped_at=utc_now())
+            log_event("api.lifecycle", "Listener shutdown completed.", reason=shutdown_reason,
+                      cleanup_errors=cleanup_errors, uptime_seconds=round(time.monotonic() - started))
     return 0

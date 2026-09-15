@@ -29,7 +29,11 @@ class TradingCommand:
     order_type: str
     limit_price: Decimal | None
     notional_usd: Decimal | None = None
-    allow_pre_post: bool = False
+    allow_pre_post: bool | None = None
+
+    def __post_init__(self):
+        if self.allow_pre_post is None:
+            object.__setattr__(self, "allow_pre_post", self.order_type != "market")
 
 
 @dataclass(frozen=True)
@@ -249,7 +253,7 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
     notional = _alias(payload, ("notional_usd", "notionalUsd", "dollar_amount", "dollars"),
                       _positive_decimal)
     allow_pre_post = _alias(payload, ("allow_pre_post", "allowPrePost", "extended_hours", "extendedHours"),
-                            _boolean, False)
+                            _boolean, kind != "market")
     if kind == "market":
         if price is not None:
             raise CommandError("Market commands cannot include a limit price; the API submits native MO.")

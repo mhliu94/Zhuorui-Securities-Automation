@@ -131,7 +131,12 @@ Inspect order formats offline:
 ```
 
 These are synthetic plans and send nothing. Market uses native `MO` without a
-limit price. Buy and Sell are supported. Timed-cancel uses Limit with a one-second
+limit price. Limit prices round to cents: Buy rounds up and Sell rounds down.
+Limit orders default to regular plus pre/post trading (`allowPrePost: "Y"`);
+`--no-allow-pre-post` selects regular hours only for an offline plan, and Kafka
+commands can select it with `allow_pre_post: false`. Native Market orders retain
+the captured regular-hours format. Buy and Sell are supported.
+Timed-cancel uses Limit with a one-second
 deadline from dispatch; it is not native FOK and permits partial fills. A late
 acknowledgement triggers cancellation when the reference becomes available;
 network delays can miss the target.
