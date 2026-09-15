@@ -6,6 +6,7 @@ import queue
 import tempfile
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 import unittest
 
 from zhuorui.api.client import ApiClient
@@ -78,9 +79,11 @@ class RecordingHoldings:
     def __init__(self, clock, timeline):
         self.clock, self.timeline = clock, timeline
         self.requests = []
+        self.scheduled = []
 
-    def request(self, reason):
+    def request(self, reason, *, delay_seconds=0):
         self.requests.append(reason)
+        self.scheduled.append((self.clock.now() + delay_seconds, reason))
         self.timeline.append(("holdings_request", self.clock.now(), reason))
 
 
@@ -130,7 +133,56 @@ class ExecutionTests(unittest.TestCase):
                 self.assertNotIn("allowPrePost", body)
                 self.assertNotIn("timeInForce", body)
         self.assertEqual(self.holdings.requests, ["order_submission"] * 2)
+        self.assertEqual(self.clock.sleeps, [5, 5])
+        self.assertEqual([entry[1] for entry in self.client.calls], [105, 110])
+
+    def test_mixed_order_burst_waits_five_seconds_for_each_submission(self):
+        for kind in ("market", "limit", "fok"):
+            self.executor.execute(trade(kind, kind=kind))
+        submissions = [call[1] for call in self.client.calls if call[0] == "submit"]
+        self.assertEqual(submissions, [105, 110, 115])
+        self.assertEqual(self.clock.sleeps, [5, 5, 5, 1])
+        self.assertEqual([due for due, reason in self.holdings.scheduled if reason == "order_submission"],
+                         [107, 112, 117])
+        self.assertEqual(self.client.calls[-1][0:2], ("cancel", 116))
+
+    def test_next_order_delay_starts_after_previous_submission_with_slow_ack(self):
+        self.client.ack_latency = 0.4
+        self.executor.execute(trade("first", kind="limit"))
+        self.executor.execute(trade("second"))
+        self.assertAlmostEqual(self.client.calls[0][1], 105)
+        self.assertAlmostEqual(self.client.calls[1][1], 110.4)
+
+    def test_delayed_order_uses_session_and_notional_quote_after_wait(self):
+        from dataclasses import replace
+        command = replace(trade(), quantity=None, notional_usd=Decimal("100"))
+        def quantity(symbol, budget):
+            self.assertEqual(self.clock.now(), 105)
+            return 3
+        self.client.quantity_for_notional = quantity
+        self.executor.execute(command)
+        self.assertEqual(self.timeline[0], ("sleep", 100, 5))
+        self.assertEqual(self.client.calls[0][1], 105)
+
+    def test_cancel_commands_and_nonexecuting_orders_have_no_submission_wait(self):
+        self.client.orders = [order("working", "2")]
+        self.executor.execute(CancelCommand("cancel", cancel_all=True))
+        self.settings.live_orders_enabled = False
+        self.executor.execute(trade("disabled"))
+        self.settings.live_orders_enabled = True
+        self.executor.execute(trade("disabled"))  # Duplicate.
+        self.journal.claim("uncertain", {"test": True})
+        self.journal.update("uncertain", "unknown")
+        self.executor.execute(trade("blocked"))
         self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual([call[0] for call in self.client.calls], ["cancel"])
+
+    def test_failed_delay_does_not_mark_order_as_dispatched_or_queue_holdings(self):
+        self.executor.sleep = Mock(side_effect=RuntimeError("synthetic wait failure"))
+        self.executor.execute(trade())
+        self.assertEqual(self.journal.get("command-1")["state"], "rejected")
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.holdings.requests, [])
 
     def test_limit_uses_cents_and_requests_holdings(self):
         self.executor.execute(trade(kind="limit"))
@@ -145,13 +197,19 @@ class ExecutionTests(unittest.TestCase):
         self.executor.execute(trade(kind="fok"))
         self.assertEqual(self.client.calls[0][2]["entrustProp"], "LO")
         self.assertNotIn("timeInForce", self.client.calls[0][2])
-        self.assertEqual(len(self.clock.sleeps), 1)
-        self.assertAlmostEqual(self.clock.sleeps[0], 0.8)
-        self.assertAlmostEqual(self.client.calls[1][1], 101.0)
+        self.assertEqual(len(self.clock.sleeps), 2)
+        self.assertEqual(self.clock.sleeps[0], 5)
+        self.assertAlmostEqual(self.clock.sleeps[1], 0.8)
+        self.assertAlmostEqual(self.client.calls[0][1], 105.0)
+        self.assertAlmostEqual(self.client.calls[1][1], 106.0)
+        self.assertAlmostEqual(self.journal.get("command-1")["cancel_due"], 1_800_000_106)
+        self.assertAlmostEqual(self.holdings.scheduled[0][0], 107.2)
         self.assertEqual(self.client.calls[1][2], {"orderTxnReference": "synthetic-ref"})
         names = [event[0] for event in self.timeline]
-        self.assertLess(names.index("holdings_request"), names.index("sleep"))
-        self.assertLess(names.index("sleep"), names.index("cancel"))
+        sleeps = [index for index, name in enumerate(names) if name == "sleep"]
+        self.assertLess(sleeps[0], names.index("submit"))
+        self.assertLess(names.index("holdings_request"), sleeps[1])
+        self.assertLess(sleeps[1], names.index("cancel"))
         self.assertEqual(self.holdings.requests, ["order_submission", "order_cancellation"])
         self.assertEqual(self.journal.get("command-1")["cancel_state"], "requested")
         self.assertFalse(self.events[-1][1]["native_fok"])
@@ -160,8 +218,8 @@ class ExecutionTests(unittest.TestCase):
     def test_fok_late_ack_cancels_immediately_without_another_second(self):
         self.client.ack_latency = 1.4
         self.executor.execute(trade(kind="fok"))
-        self.assertEqual(self.clock.sleeps, [])
-        self.assertAlmostEqual(self.client.calls[1][1], 101.4)
+        self.assertEqual(self.clock.sleeps, [5])
+        self.assertAlmostEqual(self.client.calls[1][1], 106.4)
         self.assertTrue(self.events[-1][1]["cancellation_deadline_missed"])
 
     def test_lost_ack_requests_holdings_without_resubmit_or_guessing_cancel(self):
@@ -171,7 +229,7 @@ class ExecutionTests(unittest.TestCase):
         self.executor.execute(command)
         self.assertEqual([call[0] for call in self.client.calls], ["submit"])
         self.assertEqual(self.holdings.requests, ["order_submission"])
-        self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual(self.clock.sleeps, [5])
         self.assertEqual(self.journal.get(command.command_id)["state"], "unknown")
         self.assertEqual([event[0] for event in self.events], ["unknown", "duplicate"])
 
@@ -306,42 +364,88 @@ class ExecutionTests(unittest.TestCase):
             self.client.ack_latency = 0.2
             self.executor.execute(trade(kind="fok"))
             self.assertEqual(reasons, ["periodic"])
-            self.assertAlmostEqual(self.client.calls[1][1], 101)
+            self.assertAlmostEqual(self.client.calls[1][1], 106)
         finally:
             release.set()
             publisher.close()
-        self.assertEqual(reasons, ["periodic", "order_submission", "order_cancellation"])
+        self.assertEqual(reasons, ["periodic", "order_cancellation", "order_submission"])
+
+
+class VirtualQueue(queue.Queue):
+    """Queue arrivals and timeouts driven by a clock, without real sleeps."""
+    def __init__(self, clock, events):
+        super().__init__()
+        self.clock, self.events = clock, list(events)
+
+    def get(self, timeout):
+        target = self.clock.now() + timeout
+        while True:
+            try:
+                return super().get(block=False)
+            except queue.Empty:
+                if self.events and self.events[0][0] <= target:
+                    arrival, action = self.events.pop(0)
+                    self.clock.value = max(self.clock.now(), arrival)
+                    action()
+                else:
+                    self.clock.value = target
+                    raise
 
 
 class PublishingScheduleTests(unittest.TestCase):
-    def test_periodic_every_thirty_seconds_and_immediate_requests_do_not_reset_schedule(self):
-        timeline = []
-        clock = Clock(timeline)
+    def run_schedule(self, events):
+        clock = Clock([])
         publisher = HoldingsPublisher({}, SimpleNamespace(holdings_interval_seconds=30),
                                       None, None, None, now=clock.now)
-        publications, waits = [], []
+        publications = []
+        def publish(reason):
+            publications.append((reason, clock.now()))
+        publisher.publish = publish
+        actions = []
+        for arrival, reason, delay in events:
+            action = (lambda: publisher.requests.put(None)) if reason is None else (
+                lambda reason=reason, delay=delay: publisher.request(reason, delay_seconds=delay))
+            actions.append((arrival, action))
+        publisher.requests = VirtualQueue(clock, actions)
+        publisher._run()
+        return publications
+
+    def test_periodic_every_thirty_seconds_and_immediate_requests_do_not_reset_schedule(self):
+        publications = self.run_schedule([(105, "login_recovery", 0), (131, None, 0)])
+        self.assertEqual(publications, [("periodic", 100), ("login_recovery", 105), ("periodic", 130)])
+
+    def test_post_submission_refresh_waits_two_seconds_without_shifting_periodic(self):
+        publications = self.run_schedule([(105, "order_submission", 2), (131, None, 0)])
+        self.assertEqual(publications, [("periodic", 100), ("order_submission", 107), ("periodic", 130)])
+
+    def test_pending_refresh_does_not_delay_periodic_or_immediate_cancellation(self):
+        publications = self.run_schedule([(129, "order_submission", 2),
+                                          (129.5, "order_cancellation", 0), (132, None, 0)])
+        self.assertEqual(publications, [("periodic", 100), ("order_cancellation", 129.5),
+                                        ("periodic", 130), ("order_submission", 131)])
+
+    def test_burst_retains_every_request_including_equal_deadlines(self):
+        publications = self.run_schedule([(105, "order_submission", 2),
+                                          (105, "order_submission", 2),
+                                          (106, "order_submission", 2), (109, None, 0)])
+        self.assertEqual(publications, [("periodic", 100), ("order_submission", 107),
+                                        ("order_submission", 107), ("order_submission", 108)])
+
+    def test_busy_worker_does_not_add_another_delay_when_it_reads_request(self):
+        clock = Clock([])
+        publisher = HoldingsPublisher({}, SimpleNamespace(holdings_interval_seconds=30),
+                                      None, None, None, now=clock.now)
+        publications = []
         publisher.publish = lambda reason: publications.append((reason, clock.now()))
+        publisher.request("order_submission", delay_seconds=2)
+        clock.value = 110  # Worker was occupied past the request's deadline.
+        publisher.requests.put(None)
+        publisher._run()
+        self.assertEqual(publications, [("periodic", 110), ("order_submission", 110)])
 
-        class ScriptedQueue:
-            index = 0
-
-            def get(self, timeout):
-                waits.append(timeout)
-                self.index += 1
-                if self.index == 1:
-                    raise queue.Empty
-                if self.index == 2:
-                    clock.value += 5
-                    return "order_submission"
-                if self.index == 3:
-                    clock.value += timeout
-                    raise queue.Empty
-                return None
-
-        publisher.requests = ScriptedQueue()
-        publisher.run()
-        self.assertEqual(publications, [("periodic", 100), ("order_submission", 105), ("periodic", 130)])
-        self.assertEqual(waits, [0, 30, 25, 30])
+    def test_close_drains_delayed_refresh_at_its_deadline(self):
+        publications = self.run_schedule([(105, "order_submission", 2), (106, None, 0)])
+        self.assertEqual(publications, [("periodic", 100), ("order_submission", 107)])
 
 
 if __name__ == "__main__":

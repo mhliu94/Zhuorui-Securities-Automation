@@ -117,7 +117,7 @@ class ApiRecordReplayTests(unittest.TestCase):
             {"accountId": "synthetic-client", "userId": "synthetic-user"}}
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.executor = CommandExecutor(SETTINGS, API_SETTINGS, self.journal, lambda: self.client,
-                                        self.holdings, self.emit)
+                                        self.holdings, self.emit, sleep=Mock())
 
     def tearDown(self):
         self.journal.close()
@@ -145,7 +145,7 @@ class ApiRecordReplayTests(unittest.TestCase):
         self.assertEqual(self.journal.get("producer-id")["state"], "unknown")
         self.assertEqual(self.journal.get("next-producer-id")["state"], "blocked")
         self.assertEqual(self.emit.call_args.args[1], "blocked")
-        self.holdings.request.assert_called_once_with("order_submission")
+        self.holdings.request.assert_called_once_with("order_submission", delay_seconds=2)
 
     def test_same_id_with_changed_economics_is_rejected_without_resubmission(self):
         self.handle(record())
@@ -268,6 +268,8 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.consumer.poll.return_value = {"unused-partition-key": [record()]}
         self.at_commit = []
+        from tests.test_api_execution import Clock
+        self.clock = Clock([])
 
         def committed(_):
             with closing(sqlite3.connect(self.settings.journal_file)) as db:
@@ -285,6 +287,8 @@ class ApiListenerLifecycleTests(unittest.TestCase):
              patch("zhuorui.api.listener.load_listener_settings", return_value=self.settings), \
              patch("zhuorui.api.listener.ClientProvider", return_value=self.clients), \
              patch("zhuorui.api.listener.HoldingsPublisher", return_value=self.publisher), \
+             patch("zhuorui.api.listener.CommandExecutor", side_effect=lambda *a, **kw:
+                   CommandExecutor(*a, **kw, now=self.clock.now, wall=self.clock.wall, sleep=self.clock.sleep)), \
              patch("zhuorui.api.listener.time.time", return_value=NOW), \
              patch("builtins.print"), \
              patch("kafka.KafkaProducer", return_value=self.producer) as producer_type, \
@@ -294,6 +298,26 @@ class ApiListenerLifecycleTests(unittest.TestCase):
             finally:
                 self.producer_kwargs = producer_type.call_args.kwargs
                 self.consumer_kwargs = consumer_type.call_args.kwargs
+
+    def test_two_queued_kafka_orders_submit_after_separate_five_second_delays(self):
+        second = json.loads(record().value)
+        second["id"] = "second-order"
+        self.consumer.poll.side_effect = [{"partition": [record()]},
+                                         {"partition": [record(second, offset=11)]}]
+        submitted = []
+        response = self.client.submit_order.return_value
+        def submit(*args, **kwargs):
+            submitted.append(self.clock.now())
+            return response
+        self.client.submit_order.side_effect = submit
+        def committed(_):
+            if len(submitted) == 2:
+                self.settings.stop_file.write_text("stop")
+        self.consumer.commit.side_effect = committed
+        self.assertEqual(self.run_offline(), 0)
+        self.assertEqual(submitted, [105, 110])
+        self.assertEqual(self.clock.sleeps, [5, 5])
+        self.assertEqual(self.consumer.commit.call_count, 2)
 
     def test_installed_kafka_options_commit_after_durable_submission_and_clean_stop(self):
         self.assertEqual(self.run_offline(), 0)

@@ -1,5 +1,6 @@
 """Independent holdings publisher; order-triggered reads never delay FOK cancel."""
 import json
+import heapq
 from datetime import datetime, timezone
 from pathlib import Path
 import queue
@@ -82,9 +83,10 @@ class HoldingsPublisher:
     def start(self):
         self.thread.start()
 
-    def request(self, reason="order_submission"):
-        # A queue, not an event: every new submission gets a publication attempt.
-        self.requests.put(reason)
+    def request(self, reason="order_submission", *, delay_seconds=0):
+        # Record the deadline at request time, not when a busy worker reads it.
+        # Every request is retained; a later immediate refresh can pass it.
+        self.requests.put((self.now() + delay_seconds, reason))
 
     def publish(self, reason):
         from .snapshot import account_snapshot
@@ -145,20 +147,37 @@ class HoldingsPublisher:
 
     def _run(self):
         due = self.now()
+        pending, sequence, stopping = [], 0, False
         while True:
-            wait = max(0, due - self.now())
-            try:
-                reason = self.requests.get(timeout=wait)
-            except queue.Empty:
-                reason = "periodic"
-            if reason is None:
-                log_event("api.publisher", "Publisher stopped after draining its queue.", published=self.published)
-                return
-            self.publish(reason)
-            if reason == "periodic":
+            current = self.now()
+            # Periodic publications retain their independent cadence even when
+            # a delayed request is pending or immediate requests keep arriving.
+            if not stopping and due <= current:
+                self.publish("periodic")
                 due += self.settings.holdings_interval_seconds
                 if due <= self.now():
                     due = self.now() + self.settings.holdings_interval_seconds
+                continue
+            if pending and pending[0][0] <= current:
+                _, _, reason = heapq.heappop(pending)
+                self.publish(reason)
+                continue
+            if stopping and not pending:
+                log_event("api.publisher", "Publisher stopped after draining its queue.", published=self.published)
+                return
+            wake_at = min(due if not stopping else float("inf"),
+                          pending[0][0] if pending else float("inf"))
+            try:
+                request = self.requests.get(timeout=max(0, wake_at - self.now()))
+            except queue.Empty:
+                continue
+            if request is None:
+                # Drain accepted requests at their scheduled times on shutdown.
+                stopping = True
+            else:
+                ready_at, reason = request
+                heapq.heappush(pending, (ready_at, sequence, reason))
+                sequence += 1
 
     def close(self):
         if self.thread.ident is None:

@@ -159,9 +159,9 @@ class HoldingsStateFailureTests(unittest.TestCase):
             if self.publisher.published >= 3:
                 completed.set()
         self.publisher.publish = publish
-        self.publisher.request("periodic")
-        self.publisher.request("periodic")
-        self.publisher.request("periodic")
+        # Startup plus two queued refreshes exercise three failed state writes.
+        self.publisher.request("order_cancellation")
+        self.publisher.request("order_cancellation")
         with patch.object(Path, "replace", side_effect=PermissionError()):
             self.publisher.start()
             try:

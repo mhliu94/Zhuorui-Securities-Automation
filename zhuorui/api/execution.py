@@ -7,6 +7,10 @@ from .commands import CancelCommand, command_fingerprint
 from .errors import ApiError, BrokerRejected, SessionError, OrderOutcomeUnknown
 from .orders import plan_order, plan_cancel
 from .trade_auth import TradeAuthorizer
+from zhuorui.common.runtime_logging import log_event
+
+ORDER_SUBMISSION_DELAY_SECONDS = 5.0
+POST_ORDER_HOLDINGS_DELAY_SECONDS = 2.0
 
 TERMINAL_STATES = {"8", "6", "F", "5", "G", "9", "J", "FILLED", "CANCELED", "REJECTED", "DONE_FOR_DAY"}
 PENDING_CANCEL_STATES = {"3", "4", "PENDING_CANCEL"}
@@ -77,6 +81,13 @@ class CommandExecutor:
             return
         client = None
         try:
+            if not isinstance(command, CancelCommand):
+                # The listener executes commands serially: each order gets its
+                # own wait after the previous command has finished. Acquire the
+                # session and size from a fresh quote only after this wait.
+                log_event("api.commands", "Waiting before order submission.",
+                          delay_seconds=ORDER_SUBMISSION_DELAY_SECONDS, order_type=command.order_type)
+                self.sleep(ORDER_SUBMISSION_DELAY_SECONDS)
             client = self.client_provider()
             self.preflight(client)
             if isinstance(command, CancelCommand):
@@ -126,9 +137,10 @@ class CommandExecutor:
             self.journal.update(command.command_id, "unknown", message="Submission response is unavailable or incomplete.")
             outcome = ("unknown", "Submission outcome is unknown. The command will not be resubmitted; reconcile today's orders in the app.")
         finally:
-            # This starts an independent holdings read immediately after the
-            # submission attempt; it cannot consume the cancellation deadline.
-            self.holdings.request("order_submission")
+            # Schedule from completion of the submission attempt, before any
+            # status-network wait. The publisher owns the delay so neither the
+            # next order nor the timed cancellation waits for this refresh.
+            self.holdings.request("order_submission", delay_seconds=POST_ORDER_HOLDINGS_DELAY_SECONDS)
         if outcome:
             self.emit(command, *outcome)
             return

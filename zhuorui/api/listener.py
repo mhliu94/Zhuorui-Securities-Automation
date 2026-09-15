@@ -11,7 +11,7 @@ from .client import ApiClient
 from .commands import decode_command, parse_command, validate_command_age
 from .config import load_settings
 from .errors import ApiError, SessionError, SessionExpired, LoggedInElsewhere, LoginBlocked
-from .execution import CommandExecutor
+from .execution import CommandExecutor, ORDER_SUBMISSION_DELAY_SECONDS, POST_ORDER_HOLDINGS_DELAY_SECONDS
 from .journal import CommandJournal, InstanceLock
 from .listener_config import load_listener_settings
 from .publishing import HoldingsPublisher, ListenerState, utc_now
@@ -278,7 +278,9 @@ def _run_listener(config_path):
     state = ListenerState(settings.state_file, backend="api", running=True,
                           started_at=utc_now(), live_orders_enabled=settings.live_orders_enabled,
                           session_status="unchecked", holdings_interval_seconds=settings.holdings_interval_seconds,
-                          last_holdings_publish=None, last_error=None)
+                          last_holdings_publish=None, last_error=None,
+                          order_submission_delay_seconds=ORDER_SUBMISSION_DELAY_SECONDS,
+                          post_order_holdings_delay_seconds=POST_ORDER_HOLDINGS_DELAY_SECONDS)
     lock_file = settings.journal_file.with_suffix(settings.journal_file.suffix + ".lock")
     with InstanceLock(lock_file):
         log_previous_run(settings.state_file)
@@ -290,7 +292,9 @@ def _run_listener(config_path):
         try:
             log_event("api.lifecycle", "Listener configuration loaded.",
                       live_orders_enabled=settings.live_orders_enabled,
-                      holdings_interval_seconds=settings.holdings_interval_seconds)
+                      holdings_interval_seconds=settings.holdings_interval_seconds,
+                      order_submission_delay_seconds=ORDER_SUBMISSION_DELAY_SECONDS,
+                      post_order_holdings_delay_seconds=POST_ORDER_HOLDINGS_DELAY_SECONDS)
             journal = CommandJournal(settings.journal_file, binding(config))
             stage = "session_provider"
             clients = ClientProvider(config_path, config, api_settings, settings, state)

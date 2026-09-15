@@ -172,11 +172,24 @@ For foreground operation, run:
 
 Account snapshots use the existing KTrader `account-details` format, mapped from
 API account, cash and holdings responses. They publish at startup and every 30
-seconds. Each order submission attempt queues an immediate extra publication,
-including rejected or unknown submissions; cancellation attempts also queue one.
-The independent worker prevents holdings reads from delaying the FOK timer. If
-a publication is already in flight, the next request waits in its queue. Broker
-or Kafka outages can delay or fail delivery; local state and logs report this.
+seconds. Each order submission attempt schedules an extra holdings read two
+seconds after the attempt completes, including rejected or unknown submissions.
+Each request keeps its own deadline and publication; a busy worker does not add
+another two-second wait when it dequeues the request. The independent worker
+keeps this wait out of order processing and the FOK cancellation timer. Periodic
+publications retain their 30-second cadence, and cancellation and login-recovery
+refreshes remain immediate. A publication already in flight, or a broker/Kafka
+outage, can delay delivery. Shutdown drains accepted refreshes at their deadlines.
+
+Market, Limit and FOK orders each wait five seconds in the serial command
+consumer before checking the session, obtaining any sizing quote and submitting.
+For two queued orders, the intentional waits total five seconds for the first
+and ten seconds for the second; broker calls, status delivery and any FOK
+cancellation handling add processing time. Waits do not overlap. Disabled,
+duplicate and blocked commands do not wait or submit. Cancellation commands
+have no new delay. The FOK cancellation deadline still starts at actual dispatch,
+after the five-second wait and preflight. Status snapshots and startup logs expose
+both timing values.
 
 API command results always publish to the configured `order-status` topic,
 including disabled, rejected, duplicate and unknown results. The legacy
