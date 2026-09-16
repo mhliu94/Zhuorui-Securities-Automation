@@ -256,9 +256,7 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
                             _boolean, kind != "market")
     if kind == "market":
         if price is not None:
-            raise CommandError("Market commands cannot include a limit price; the API submits native MO.")
-        if allow_pre_post:
-            raise CommandError("Captured native Market orders do not support pre/post-session flags.")
+            raise CommandError("Market commands cannot include a limit price; session-aware pricing is automatic.")
         if quantity is None and notional is None:
             raise CommandError("MARKET_ORDER requires qty_shares or notional_usd.")
     elif price is None or quantity is None:

@@ -108,19 +108,25 @@ class CommandExecutor:
                 self.emit(command, "rejected", message)
 
     def submit(self, client, command):
-        quantity = command.quantity
-        if quantity is None:
-            quantity = client.quantity_for_notional(command.symbol, command.notional_usd)
+        quantity, price = command.quantity, command.limit_price
         kind = "timed-cancel" if command.order_type == "fok" else command.order_type
-        plan_order(command.symbol, command.side, quantity, kind, price=command.limit_price,
-                   allow_pre_post=command.allow_pre_post, cancel_after=self.api_settings.cancel_after_seconds)
+        allow_pre_post, details = command.allow_pre_post, {}
+        if kind == "market":
+            if price is not None:
+                raise ApiError("Market commands cannot include a limit price; session-aware pricing is automatic.")
+            kind, quantity, price, allow_pre_post, details = client.prepare_market_order(
+                command.symbol, command.side, quantity, command.notional_usd)
+        plan_order(command.symbol, command.side, quantity, kind, price=price,
+                   allow_pre_post=allow_pre_post, cancel_after=self.api_settings.cancel_after_seconds)
         cancel_due = self.wall() + self.api_settings.cancel_after_seconds if kind == "timed-cancel" else None
-        self.journal.update(command.command_id, "dispatching", cancel_due=cancel_due)
+        self.journal.update(command.command_id, "dispatching", cancel_due=cancel_due, execution=details)
+        if details:
+            log_event("api.commands", "Market order prepared.", command_id=command.command_id, **details)
         started = self.now()
         outcome = None
         try:
             response = client.submit_order(command.symbol, command.side, quantity, kind,
-                                           price=command.limit_price, allow_pre_post=command.allow_pre_post)
+                                           price=price, allow_pre_post=allow_pre_post)
             data = response.get("data")
             reference = data.get("orderTxnReference") if isinstance(data, dict) else None
             try:
@@ -142,7 +148,7 @@ class CommandExecutor:
             # next order nor the timed cancellation waits for this refresh.
             self.holdings.request("order_submission", delay_seconds=POST_ORDER_HOLDINGS_DELAY_SECONDS)
         if outcome:
-            self.emit(command, *outcome)
+            self.emit(command, *outcome, execution=details)
             return
         if kind == "timed-cancel":
             remaining = started + self.api_settings.cancel_after_seconds - self.now()
@@ -151,7 +157,7 @@ class CommandExecutor:
             self.timed_cancel(client, command.command_id, reference, command=command,
                               deadline_missed=self.now() > started + self.api_settings.cancel_after_seconds + 0.05)
         else:
-            self.emit(command, "submitted", "Broker acknowledged the order; acknowledgement does not establish a fill.", order_reference=reference, quantity=quantity)
+            self.emit(command, "submitted", "Broker acknowledged the order; acknowledgement does not establish a fill.", order_reference=reference, quantity=quantity, execution=details)
 
     def timed_cancel(self, client, command_id, reference, *, command=None, deadline_missed=False):
         self.journal.update(command_id, "submitted", cancel_state="dispatching")

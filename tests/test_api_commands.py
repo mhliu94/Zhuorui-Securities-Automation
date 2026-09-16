@@ -38,7 +38,7 @@ class ApiCommandTests(unittest.TestCase):
 
     def test_market_price_is_rejected_for_all_ui_aliases(self):
         for field in ("limit_price", "price", "limitPrice", "limit"):
-            with self.subTest(field=field), self.assertRaisesRegex(CommandError, "native MO"):
+            with self.subTest(field=field), self.assertRaisesRegex(CommandError, "cannot include a limit price"):
                 parse_command(order(**{field: "23.4"}), CONFIG)
 
     def test_notional_market_retains_budget_without_inventing_shares_or_price(self):
@@ -156,7 +156,8 @@ class ApiCommandTests(unittest.TestCase):
     def test_extension_flags_and_supported_tif(self):
         command = parse_command(order(type="LIMIT_ORDER", price="23", allowPrePost="Y"), CONFIG)
         self.assertTrue(command.allow_pre_post)
-        for overrides in ({"allow_pre_post": True}, {"time_in_force": "FOK"}, {"tif": "GTC"}):
+        self.assertTrue(parse_command(order(allow_pre_post=True), CONFIG).allow_pre_post)
+        for overrides in ({"time_in_force": "FOK"}, {"tif": "GTC"}):
             with self.subTest(overrides=overrides), self.assertRaises(CommandError):
                 parse_command(order(**overrides), CONFIG)
 

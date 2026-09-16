@@ -212,9 +212,42 @@ Examples of accepted shapes; replace IDs and order fields before use:
 {"id":"example-cancel","account_num_id":1,"type":"CANCEL_ORDER","orderTxnReference":"EXAMPLE_BROKER_REFERENCE"}
 ```
 
-Buy and Sell Market commands send native `entrustProp: MO`, omitting
-`entrustPrice`, `allowPrePost` and native FOK flags. A Market command containing
-a price is rejected. Limit sends `LO` and rounds its price to cents before signing:
+Market commands query Zhuorui's US equities market status after the five-second
+wait and account preflight. Regular-session orders send native `entrustProp: MO`
+without a price or pre/post flag. Premarket and postmarket commands become
+DAY limit orders (`LO`, `allowPrePost: "Y"`; DAY is the captured broker default):
+
+- Fetch the real-time order book from `/as_market/api/order/v1/latest`.
+- Buy: best ask multiplied by 1.01, then round up to the next cent.
+- Sell: best bid multiplied by 0.99, then round down to the next cent.
+- Retry a failed or unusable price read once (two attempts maximum). Authentication
+  failures stop immediately. Submission itself is never retried.
+- Require the exact US symbol, positive price and displayed size, a valid
+  New York exchange timestamp no older than `quote_max_age_seconds` (default 30),
+  and no explicit delayed flag. Do not fall back to the delayed last-trade API.
+- Use the best level regardless of requested size; do not walk depth. Partial
+  fills or an unfilled limit remain possible.
+- Reject closed, halted, overnight, unknown, ambiguous, stale or inconsistent
+  session status. Check the session again locally after quote preparation so a
+  read crossing the opening/closing boundary cannot use the previous session.
+
+The status endpoint is `/as_market/api/market_trade_status/v2/get_market_status`.
+App 3.1.7 defines status 11 as US premarket, 4 as regular trading, and 12 as US
+postmarket. Select market 2 / authProductType 0 (US equities). Its `nowDate`
+is the session transition timestamp, not the response update time; the
+`delay` flag describes quote entitlement. A fresh status response must agree
+with the current New York date and session window. Postmarket status also
+permits a broker-confirmed early close from 13:00 ET. Windows timezone data
+comes from the pinned `tzdata` dependency.
+
+This automatic routing applies to all Market commands regardless of the legacy
+pre/post flag. Explicit Limit flags retain their existing meaning. The journal
+keeps the original command for duplicate detection and a separate `execution`
+record with the actual type, limit, session, best level, timestamp and attempts;
+result events also include this record. Existing commands are never replayed.
+
+A Market command containing a price is rejected. Explicit Limit sends `LO`
+and rounds its price to cents before signing:
 Buy rounds up and Sell rounds down (for example, `322.1064` becomes `322.11` for
 Buy or `322.10` for Sell). Exact-cent prices retain their value. A Sell price that
 rounds to zero is rejected locally. This also applies to timed-cancel Limit orders.
@@ -225,18 +258,18 @@ captured instruction permitting regular and pre/post trading. An explicit
 `allow_pre_post: false` (or equivalent alias) sends `"N"` for regular hours only.
 The offline CLI follows the same defaults; `--no-allow-pre-post` selects regular
 hours only. `sessionType` is an order-response field, not a captured submission
-parameter. Native Market orders retain the app's `MO` request without a price
-or extended-hours override. Extended-hours native Market submission is not
-verified or implemented. A Market order submitted before regular hours may remain pending with the
-broker until the market opens. Check its broker status before submitting again.
+parameter. The offline `plan-order` CLI only creates a transport-level plan;
+it does not fetch session status or convert a Market command. Live listener
+Market commands use the automatic session routing described above.
 Shares must be positive integers.
 
-Market also accepts `notional_usd` without shares. The client requests a fresh,
-real-time quote for the exact US symbol and rounds down to whole shares. Delayed,
-stale, ambiguous or inactive quotes reject this sizing mode; use `qty_shares`
-when a suitable quote is unavailable. Quote-based sizing is not a guaranteed
-maximum execution cost: the final order remains Market. If both shares and a
-notional amount are supplied, explicit shares take precedence.
+Market also accepts `notional_usd` without shares. In extended hours, divide
+the notional by the rounded synthetic limit and floor to whole shares; a
+notional below one share rejects. For buys this bounds the share cost before
+fees at the limit. Regular-session notional sizing retains the existing
+fresh real-time last-trade query and rejects delayed, stale, ambiguous or
+inactive quotes; its final order remains Market and has no execution-price cap.
+If both shares and a notional amount are supplied, explicit shares take precedence.
 
 `LIMIT_ORDER_FOK`, `fok`, `fill_or_kill`, and Limit with `time_in_force: FOK` all
 use the one-second cancellation policy. It submits `LO` and targets cancellation

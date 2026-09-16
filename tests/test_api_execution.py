@@ -49,6 +49,11 @@ class RecordingClient(ApiClient):
         self.account = {"code": "000000", "data": {"clientId": "synthetic-client"}}
         self.trade_auth = {"code": "000000", "data": {"accountId": "synthetic-client", "userId": "synthetic-user"}}
 
+    def prepare_market_order(self, symbol, side, quantity, budget=None):
+        if quantity is None:
+            quantity = self.quantity_for_notional(symbol, budget)
+        return "market", quantity, None, False, {"market_session": "regular"}
+
     def query(self, name):
         self.timeline.append(("query", self.clock.now(), name))
         if name == "account":

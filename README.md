@@ -177,7 +177,11 @@ of intentional waiting, plus normal processing time. The FOK cancellation timer
 starts at dispatch, after this wait. Cancellation commands are not delayed.
 
 Every command needs a matching `account_id` or `account_num_id`. Provided server
-selectors must match too. `MARKET_ORDER` uses native `MO` and rejects price fields.
+selectors must match too. `MARKET_ORDER` rejects price fields and uses native `MO`
+during regular hours. In premarket and after-hours it becomes a DAY `LO` using
+Zhuorui's fresh order book: best ask +1% for buys (round up to cents), best bid
+-1% for sells (round down). A failed or unusable price read is retried once;
+orders are never resubmitted automatically. Closed or unknown sessions reject.
 `LIMIT_ORDER` and `LIMIT_ORDER_FOK` require `qty_shares` and `limit_price`; FOK uses
 the one-second cancellation policy. Market also accepts `notional_usd` when a
 fresh real-time quote is available; delayed quotes require explicit `qty_shares`.

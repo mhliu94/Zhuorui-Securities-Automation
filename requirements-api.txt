@@ -2,3 +2,4 @@
 cryptography==48.0.1
 gmalg==1.1.2
 kafka-python==3.0.7
+tzdata==2026.4

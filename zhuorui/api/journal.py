@@ -29,6 +29,8 @@ class CommandJournal:
         if existing and existing[0] != encoded:
             self.db.close()
             raise ApiError("Command journal belongs to another configured account; use a separate journal file.")
+        if "execution" not in {row[1] for row in self.db.execute("PRAGMA table_info(commands)")}:
+            self.db.execute("ALTER TABLE commands ADD COLUMN execution TEXT")
         self.db.execute("INSERT OR IGNORE INTO metadata VALUES ('binding',?)", (encoded,))
         self.db.commit()
 
@@ -46,11 +48,13 @@ class CommandJournal:
                             (command_id, digest, encoded, now, now))
         return True
 
-    def update(self, command_id, state, *, reference=None, cancel_due=None, cancel_state=None, message=None):
+    def update(self, command_id, state, *, reference=None, cancel_due=None, cancel_state=None, message=None, execution=None):
         with self.db:
             self.db.execute("""UPDATE commands SET state=?, updated=?, reference=COALESCE(?,reference),
-                cancel_due=COALESCE(?,cancel_due), cancel_state=COALESCE(?,cancel_state), message=? WHERE id=?""",
-                (state, time.time(), reference, cancel_due, cancel_state, message, command_id))
+                cancel_due=COALESCE(?,cancel_due), cancel_state=COALESCE(?,cancel_state), message=?,
+                execution=COALESCE(?,execution) WHERE id=?""",
+                (state, time.time(), reference, cancel_due, cancel_state, message,
+                 canonical(execution).decode() if execution is not None else None, command_id))
 
     def get(self, command_id):
         row = self.db.execute("SELECT * FROM commands WHERE id=?", (command_id,)).fetchone()

@@ -98,7 +98,7 @@ class ApiRecordHandlingTests(unittest.TestCase):
         payload["price"] = "25"
         self.handle(record(payload))
         self.executor.execute.assert_not_called()
-        self.assertIn("native MO", self.emit.call_args.args[2])
+        self.assertIn("session-aware pricing", self.emit.call_args.args[2])
 
     def test_executor_validation_error_is_a_rejection(self):
         self.executor.execute.side_effect = ApiError("validation failed")
@@ -115,6 +115,7 @@ class ApiRecordReplayTests(unittest.TestCase):
         self.client.query.side_effect = lambda name: {"code": "000000", "data":
             {"clientId": "synthetic-client"} if name == "account" else
             {"accountId": "synthetic-client", "userId": "synthetic-user"}}
+        self.client.prepare_market_order.side_effect = lambda symbol, side, quantity, budget: ("market", quantity, None, False, {})
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.executor = CommandExecutor(SETTINGS, API_SETTINGS, self.journal, lambda: self.client,
                                         self.holdings, self.emit, sleep=Mock())
@@ -265,6 +266,7 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.client.query.side_effect = lambda name: {"code": "000000", "data":
             {"clientId": "synthetic-client"} if name == "account" else
             {"accountId": "synthetic-client", "userId": "synthetic-user"}}
+        self.client.prepare_market_order.side_effect = lambda symbol, side, quantity, budget: ("market", quantity, None, False, {})
         self.client.submit_order.return_value = {"code": "000000", "data": {"orderTxnReference": "synthetic-ref"}}
         self.consumer.poll.return_value = {"unused-partition-key": [record()]}
         self.at_commit = []

@@ -13,7 +13,8 @@ import urllib.request
 from decimal import Decimal
 import re
 
-from .errors import ApiError, SessionExpired, LoggedInElsewhere, BrokerRejected, OrderOutcomeUnknown
+from .errors import ApiError, SessionError, SessionExpired, LoggedInElsewhere, BrokerRejected, OrderOutcomeUnknown
+from .market_data import ORDER_BOOK_PATH, MARKET_STATUS_PATH
 from .orders import plan_order, plan_cancel
 from .session import HOST, READ_PATHS
 from .signing import canonical, signature
@@ -86,6 +87,52 @@ class ApiClient:
                              {"clientId": client_id, "password": trade_password_ciphertext(password)},
                              trade_auth=True)
 
+    def prepare_market_order(self, symbol, side, quantity, budget=None):
+        """Read-only preparation. Retry the price read once, never a submission."""
+        from .market_data import (parse_session, parse_best_quote, market_limit_price,
+                                  quantity_at_limit)
+        if not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9.=\-]{1,16}", symbol):
+            raise ApiError("Invalid US stock symbol.")
+        started = self.now()
+        response = self._request(MARKET_STATUS_PATH, {})
+        session = parse_session(response, started=started, now=self.now(),
+                                max_age=self.settings.quote_max_age_seconds)
+        details = {"requested_order_type": "market", "market_session": session.name,
+                   "market_status_observed_at": session.observed_at}
+        price, quote = None, None
+        if session.name == "regular":
+            if quantity is None:
+                quantity = self.quantity_for_notional(symbol, budget)
+            kind, allow_pre_post = "market", False
+        else:
+            for attempt in range(2):
+                try:
+                    response = self._request(ORDER_BOOK_PATH, {"code": symbol, "ts": "US"})
+                    quote = parse_best_quote(response, symbol, side, now=self.now(),
+                                             max_age=self.settings.quote_max_age_seconds)
+                    if quote.timestamp < session.changed_at:
+                        raise ApiError("Order book predates the current extended-hours session.")
+                    break
+                except SessionError:
+                    raise
+                except ApiError as exc:
+                    if attempt == 1:
+                        reason = str(exc).replace("; no retry was attempted.", ".")
+                        raise ApiError("Real-time price query failed after two attempts: " + reason) from None
+            price = market_limit_price(quote, side)
+            if quantity is None:
+                quantity = quantity_at_limit(budget, price)
+            kind, allow_pre_post = "limit", True
+            details.update(quote_side=quote.side, quote_price=str(quote.price),
+                           quote_size=str(quote.quantity), quote_timestamp=quote.timestamp,
+                           quote_attempts=attempt + 1, price_offset_percent=1,
+                           quote_source=ORDER_BOOK_PATH)
+            quote.validate(self.now(), self.settings.quote_max_age_seconds)
+        session.validate(self.now())
+        details.update(submitted_order_type=kind, limit_price=str(price) if price is not None else None,
+                       allow_pre_post=allow_pre_post, quantity=quantity)
+        return kind, quantity, price, allow_pre_post, details
+
     def quantity_for_notional(self, symbol, budget):
         if not isinstance(symbol, str) or not re.fullmatch(r"[A-Z0-9.=\-]{1,16}", symbol):
             raise ApiError("Invalid US symbol for quantity sizing.")
@@ -127,7 +174,7 @@ class ApiClient:
     def _request(self, path, body, *, write=False, login=False, trade_auth=False):
         if sum((bool(write), bool(login), bool(trade_auth))) > 1:
             raise ApiError("Unsupported mixed broker operation.")
-        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH})
+        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH, ORDER_BOOK_PATH, MARKET_STATUS_PATH})
         if path not in permitted:
             raise ApiError("Unsupported broker operation.")
         payload = {**body, "timeStamp": int(self.now() * 1000)}
