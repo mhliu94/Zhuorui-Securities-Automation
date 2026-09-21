@@ -7,7 +7,8 @@ param(
     [int]$Interval = 60,
     [string]$CertificatePath,
     [string]$PrivateKeyPath,
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$Recovery
 )
 
 # Compatibility launcher; implementation is under scripts/windows.

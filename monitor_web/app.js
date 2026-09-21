@@ -13,6 +13,7 @@ const elements = Object.fromEntries(
     "account-id", "server-id", "script-card", "script-status", "script-pid",
     "script-started", "script-duration", "script-message", "script-start", "script-stop", "script-restart",
     "script-execution", "script-last-publish", "script-title", "service-description", "query-session-label",
+    "recovery-message", "recovery-api", "recovery-monitor", "recovery-checked",
     "emulator-card", "emulator-status", "emulator-avd", "emulator-device",
     "emulator-availability", "emulator-started", "emulator-duration",
     "emulator-message", "emulator-start", "emulator-stop",
@@ -133,7 +134,9 @@ function setButtonState() {
   const emulatorRunning = Boolean(state.status?.emulator?.running);
   const busy = Boolean(state.busyAction);
   elements["script-start"].disabled = busy || scriptRunning;
-  elements["script-stop"].disabled = busy || !scriptRunning;
+  const recoveryEnabled = Boolean(state.status?.recovery?.enabled);
+  const wantsRunning = state.status?.recovery?.components?.api?.desired_running;
+  elements["script-stop"].disabled = busy || (!scriptRunning && !(recoveryEnabled && wantsRunning !== false));
   elements["script-restart"].disabled = busy || !scriptRunning;
   elements["emulator-start"].disabled = busy || emulatorRunning;
   elements["emulator-stop"].disabled = busy || !emulatorRunning;
@@ -159,7 +162,7 @@ function renderStatus(payload) {
     ? "Restart the API listener after active work finishes?"
     : "Restart the UI listener? Active Android automation will be interrupted.";
   elements["script-stop"].dataset.confirm = isApi
-    ? "Stop the API listener after active work finishes?"
+    ? "Stop the API listener after active work finishes? Automatic restart stays paused until you click Start."
     : "Stop the UI listener? Trading commands and holdings updates will pause.";
   elements["emulator-stop"].dataset.confirm = isApi
     ? "Stop the Android emulator? API queries and password login use the saved identity."
@@ -177,6 +180,15 @@ function renderStatus(payload) {
   elements["script-started"].textContent = script.running ? localDateTime(script.started_at) : "—";
   elements["script-duration"].textContent = script.running ? durationText(script.duration_seconds) : "Not running";
   elements["script-message"].textContent = script.message || "Listener status unavailable.";
+  const recovery = payload.recovery || {};
+  elements["recovery-message"].textContent = recovery.message || "Automatic recovery is not configured.";
+  elements["recovery-checked"].textContent = localDateTime(recovery.checked_at);
+  for (const component of ["api", "monitor"]) {
+    const detail = recovery.components?.[component];
+    elements[`recovery-${component}`].textContent = detail
+      ? `${detail.message || detail.state}${detail.next_attempt_at && detail.state === "retry_wait" ? ` Next attempt: ${localDateTime(detail.next_attempt_at)}.` : ""}`
+      : "Not configured";
+  }
 
   paintStatus(elements["emulator-status"], emulator.state);
   elements["emulator-card"].dataset.state = emulator.state || "unavailable";

@@ -31,6 +31,9 @@ function Get-TrackedListener {
         } elseif ($SavedRun.backend -and $SavedRun.backend -ne 'ui') {
             $Verified = $false
         }
+        if ($SavedRun.python -and $SavedProcess.Path) {
+            $Verified = $Verified -and ([string]$SavedRun.python -eq $SavedProcess.Path)
+        }
     } catch { $Verified = $false }
     return @{ Process = $SavedProcess; Run = $SavedRun; Verified = $Verified; Pid = [int]$SavedPid }
 }
@@ -54,7 +57,9 @@ function Get-ApiListenerPython {
     $Executable = if ($ApiConfig.python_executable) {
         Resolve-ListenerConfigPath -Value ([string]$ApiConfig.python_executable) -BaseDirectory $ConfigDirectory
     } else {
-        Join-Path $ProjectRoot '.venv-api\Scripts\python.exe'
+        $Independent = Join-Path $ProjectRoot 'runtime\python-env\Scripts\python.exe'
+        if (Test-Path -LiteralPath $Independent -PathType Leaf) { $Independent }
+        else { Join-Path $ProjectRoot '.venv-api\Scripts\python.exe' }
     }
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
         throw 'API Python was not found. Install requirements-api.txt in .venv-api, or set api.python_executable.'

@@ -6,9 +6,13 @@ param(
 $ErrorActionPreference = "Stop"
 $Url = if ($Port -eq 443) { "https://${HostAddress}/healthz" } else { "https://${HostAddress}:$Port/healthz" }
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot 'recovery_common.ps1')
+$IndependentPy = Get-RecoveryPython $Root
 $ProjectPy = Join-Path $Root ".venv\Scripts\python.exe"
 $BundledPy = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-if (Test-Path -LiteralPath $ProjectPy) {
+if ($IndependentPy) {
+    $PythonExe = $IndependentPy
+} elseif (Test-Path -LiteralPath $ProjectPy) {
     $PythonExe = $ProjectPy
 } elseif (Test-Path -LiteralPath $BundledPy) {
     $PythonExe = $BundledPy

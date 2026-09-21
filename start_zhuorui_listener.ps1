@@ -1,6 +1,7 @@
 param(
     [string]$ConfigPath = ".\zhuorui_config.json",
-    [ValidateSet('api', 'ui')][string]$Backend = 'api'
+    [ValidateSet('api', 'ui')][string]$Backend = 'api',
+    [switch]$Recovery
 )
 
 # Compatibility launcher; implementation is under scripts/windows.

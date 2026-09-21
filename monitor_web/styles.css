@@ -557,6 +557,13 @@ main {
   white-space: nowrap;
 }
 
+.recovery-panel .query-stats dd {
+  font: 400 12px/1.5 Arial, sans-serif;
+  letter-spacing: normal;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .health-panel {
   margin-top: 20px;
   padding: 28px 30px 30px;

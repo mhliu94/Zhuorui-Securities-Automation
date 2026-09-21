@@ -1,10 +1,19 @@
 param(
     [string]$ConfigPath = '.\zhuorui_config.json',
-    [ValidateSet('api', 'ui')][string]$Backend = 'api'
+    [ValidateSet('api', 'ui')][string]$Backend = 'api',
+    [switch]$Recovery
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot 'listener_common.ps1')
+. (Join-Path $PSScriptRoot 'recovery_common.ps1')
+$ControlLock = Enter-ServiceControlLock $Root 'listener'
+try {
+if ($Recovery) {
+    $Intent = Read-RecoveryIntent $Root 'api'
+    if ($Backend -ne 'api' -or -not $Intent -or -not $Intent.desired_running) { return }
+    $ConfigPath = [string]$Intent.parameters.ConfigPath
+}
 $Paths = Get-ListenerPaths -ProjectRoot $Root -Backend $Backend
 $ResolvedConfig = Resolve-ListenerConfigPath -Value $ConfigPath -BaseDirectory $Root
 $Config = Get-Content -LiteralPath $ResolvedConfig -Raw | ConvertFrom-Json
@@ -19,9 +28,14 @@ if ($Other) {
 $Existing = Get-TrackedListener -Paths $Paths -Backend $Backend
 if ($Existing) {
     if (-not $Existing.Verified) { throw 'Listener PID points to an unverified process; it was left untouched.' }
+    if ($Backend -eq 'api' -and $Existing.Run.config -ne $ResolvedConfig) {
+        throw 'The API listener is running with a different configuration; stop it before changing configurations.'
+    }
+    if ($Backend -eq 'api' -and -not $Recovery) { Set-RecoveryIntent $Root 'api' $true @{ ConfigPath = $ResolvedConfig } }
     Write-Host "Zhuorui $Backend listener is already running with PID $($Existing.Pid)."
     exit 0
 }
+if ($Backend -eq 'api' -and -not $Recovery) { Set-RecoveryIntent $Root 'api' $true @{ ConfigPath = $ResolvedConfig } }
 Remove-Item -LiteralPath $Paths.Pid -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $Paths.Current -Force -ErrorAction SilentlyContinue
 $StopFile = $null
@@ -79,3 +93,4 @@ if ($Process.HasExited) {
 Write-Host "Started Zhuorui $Backend listener with PID $($Process.Id)."
 Write-Host "stdout: $OutLog"
 Write-Host "stderr: $ErrLog"
+} finally { $ControlLock.Dispose() }

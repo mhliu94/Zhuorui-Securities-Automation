@@ -19,7 +19,7 @@ class ListenerLauncherTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.scripts = self.root / "scripts" / "windows"
         self.scripts.mkdir(parents=True)
-        for name in ("listener_common.ps1", "start_zhuorui_listener.ps1", "stop_zhuorui_listener.ps1"):
+        for name in ("listener_common.ps1", "recovery_common.ps1", "start_zhuorui_listener.ps1", "stop_zhuorui_listener.ps1"):
             shutil.copyfile(SOURCE / name, self.scripts / name)
         self.python = self.root / ".venv-api" / "Scripts" / "python.exe"
         self.python.parent.mkdir(parents=True)
@@ -129,6 +129,19 @@ function taskkill.exe { throw 'Unexpected force kill' }
         self.assertIn("not force-killed", result.stderr)
         self.assertTrue((self.root / "runtime" / "api" / "listener.stop").exists())
         self.assertTrue((self.root / "zhuorui_api_listener.pid").exists())
+
+    def test_start_cannot_change_recovery_account_while_listener_is_running(self):
+        result = self.run_script(r'''
+$Started = [datetime]::UtcNow
+'999991' | Set-Content (Join-Path $PSScriptRoot 'zhuorui_api_listener.pid')
+@{pid=999991;backend='api';started_utc=$Started.ToString('o');script=(Join-Path $PSScriptRoot 'zhuorui_api.py');config=(Join-Path $PSScriptRoot 'different-account.json')} | ConvertTo-Json | Set-Content (Join-Path $PSScriptRoot 'zhuorui_api_listener.current.json')
+function Get-Process { return [pscustomobject]@{Id=999991;StartTime=$Started} }
+function Start-Process { throw 'Must not launch' }
+& (Join-Path $PSScriptRoot 'scripts\windows\start_zhuorui_listener.ps1')
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different configuration", result.stderr)
+        self.assertFalse((self.root / "runtime" / "recovery" / "api.intent.json").exists())
 
     def test_backend_mismatch_does_not_send_stop_request(self):
         result = self.run_script(r"""

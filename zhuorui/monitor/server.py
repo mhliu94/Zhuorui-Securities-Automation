@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 
 from zhuorui.common.config import config_bool, ZhuoruiAutomationError
 from zhuorui.common.runtime_logging import log_event
+from zhuorui.monitor.recovery import recovery_status
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1122,6 +1123,7 @@ class ZhuoruiController:
             "holdings_queries": self.holdings_query_performance(script),
             "emulator": emulator,
             "health": self.health_status(emulator, checked_at),
+            "recovery": recovery_status(self.root, now=checked_at),
             "checked_at": iso_utc(checked_at),
             "next_check_at": iso_utc(checked_at + timedelta(seconds=interval_seconds)),
             "interval_seconds": interval_seconds,
@@ -1150,12 +1152,17 @@ class ZhuoruiController:
         return ActionResult(result.returncode == 0, command_message(result))
 
     def start_script(self) -> ActionResult:
+        if os.name == "nt" and self.backend == "api":
+            return self._control_script("start_zhuorui_listener", timeout=45)
         status = self.script_status()
         if status["running"]:
             return ActionResult(True, f"The Zhuorui {self.backend.upper()} listener is already running with PID {status['pid']}.")
         return self._control_script("start_zhuorui_listener", timeout=30)
 
     def stop_script(self) -> ActionResult:
+        if os.name == "nt" and self.backend == "api":
+            # Persist Stop even between a crash and the watchdog's next attempt.
+            return self._control_script("stop_zhuorui_listener", timeout=75)
         status = self.script_status()
         if not status["running"]:
             return ActionResult(True, f"The Zhuorui {self.backend.upper()} listener is not running.")
@@ -1988,6 +1995,17 @@ def resolve_public_host(explicit_host: str | None, config_path: Path = PROJECT_R
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from zhuorui.api.journal import InstanceLock
+    from zhuorui.api.errors import ApiError
+    try:
+        with InstanceLock(PROJECT_ROOT / "runtime" / "monitor.instance.lock"):
+            return _main(argv)
+    except ApiError as exc:
+        log_event("monitor.lifecycle", "Control Room instance could not start.", level="ERROR", error=exc)
+        return 1
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     args.public_host = resolve_public_host(args.public_host)
     if not 1 <= args.port <= 65535:
@@ -2042,6 +2060,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_event("monitor.lifecycle", "Control Room startup failed.", level="ERROR", error=exc, port=args.port)
         return 1
 
+    stop_file = PROJECT_ROOT / "runtime" / "monitor.stop"
+    stop_file.unlink(missing_ok=True)
+    finished = threading.Event()
+
+    def watch_stop():
+        while not finished.wait(0.5):
+            if stop_file.exists():
+                log_event("monitor.lifecycle", "Stop file observed; shutting down Control Room.")
+                server.shutdown()
+                return
+
+    stop_thread = threading.Thread(target=watch_stop, name="monitor-stop", daemon=True)
+    stop_thread.start()
     monitor.start()
     if redirect_server:
         redirect_thread = threading.Thread(
@@ -2068,6 +2099,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_event("monitor.lifecycle", "Control Room serving failed.", level="ERROR", error=exc)
         raise
     finally:
+        finished.set()
         log_event("monitor.lifecycle", "Control Room shutdown started.")
         server.shutdown()
         server.server_close()
@@ -2077,6 +2109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if redirect_thread:
             redirect_thread.join(timeout=5)
         monitor.stop()
+        stop_thread.join(timeout=2)
         log_event("monitor.lifecycle", "Control Room shutdown completed.")
     return 0
 

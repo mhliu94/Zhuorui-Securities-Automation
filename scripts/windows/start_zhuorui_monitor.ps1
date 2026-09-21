@@ -7,12 +7,25 @@ param(
     [int]$Interval = 60,
     [string]$CertificatePath,
     [string]$PrivateKeyPath,
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$Recovery
 )
 
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot 'recovery_common.ps1')
+$ControlLock = Enter-ServiceControlLock $Root 'monitor'
+try {
+if ($Recovery) {
+    $Intent = Read-RecoveryIntent $Root 'monitor'
+    if (-not $Intent -or -not $Intent.desired_running) { return }
+    $Allowed = @('Port','RedirectHttpPort','HostAddress','PublicHost','Interval','CertificatePath','PrivateKeyPath')
+    foreach ($Property in $Intent.parameters.PSObject.Properties) {
+        if ($Property.Name -notin $Allowed) { throw 'Unsupported saved monitor launch parameter.' }
+        Set-Variable -Name $Property.Name -Value $Property.Value
+    }
+}
 $ServerPath = Join-Path $Root "zhuorui_monitor.py"
 $PidPath = Join-Path $Root "zhuorui_monitor.pid"
 $CurrentRunPath = Join-Path $Root "zhuorui_monitor.current.json"
@@ -66,6 +79,21 @@ if (-not (Test-Path -LiteralPath $CertificatePath) -or -not (Test-Path -LiteralP
     & (Join-Path $Root "setup_zhuorui_monitor_https.ps1")
 }
 
+$LaunchParameters = @{
+        Port=$Port; RedirectHttpPort=$RedirectHttpPort; HostAddress=$HostAddress; PublicHost=$PublicHost
+        Interval=$Interval; CertificatePath=$CertificatePath; PrivateKeyPath=$PrivateKeyPath
+}
+$TrackedMonitor = Get-TrackedMonitor $Root
+if ($TrackedMonitor -and -not $TrackedMonitor.Verified) { throw 'Monitor PID points to an unverified process; it was left untouched.' }
+if ($TrackedMonitor -and $TrackedMonitor.Run.parameters) {
+    foreach ($Key in $LaunchParameters.Keys) {
+        if ([string]$LaunchParameters[$Key] -ne [string]$TrackedMonitor.Run.parameters.$Key) {
+            throw 'Control Room is running with different launch settings; stop it before changing settings.'
+        }
+    }
+}
+if (-not $Recovery) { Set-RecoveryIntent $Root 'monitor' $true $LaunchParameters }
+
 if (Test-Path -LiteralPath $PidPath) {
     $ExistingPid = (Get-Content -LiteralPath $PidPath -Raw).Trim()
     if ($ExistingPid -match '^\d+$') {
@@ -109,7 +137,10 @@ if (Test-Path -LiteralPath $VenvConfig) {
         $BasePy = Join-Path $Matches[1].Trim() "python.exe"
     }
 }
-if ($BasePy -and (Test-Path -LiteralPath $BasePy)) {
+$IndependentPy = Get-RecoveryPython $Root
+if ($IndependentPy) {
+    $PythonExe = $IndependentPy
+} elseif ($BasePy -and (Test-Path -LiteralPath $BasePy)) {
     $PythonExe = $BasePy
 } elseif (Test-Path -LiteralPath $BundledPy) {
     $PythonExe = $BundledPy
@@ -144,7 +175,7 @@ $Process = Start-Process `
     -WindowStyle Hidden `
     -WorkingDirectory $Root `
     -FilePath $PythonExe `
-    -ArgumentList @("`"$ServerPath`"", "--host", "`"$HostAddress`"", "--port", "$Port", "--redirect-http-port", "$RedirectHttpPort", "--public-host", "`"$PublicHost`"", "--interval", "$Interval", "--cert-file", "`"$CertificatePath`"", "--key-file", "`"$PrivateKeyPath`"") `
+    -ArgumentList @('-u', "`"$ServerPath`"", "--host", "`"$HostAddress`"", "--port", "$Port", "--redirect-http-port", "$RedirectHttpPort", "--public-host", "`"$PublicHost`"", "--interval", "$Interval", "--cert-file", "`"$CertificatePath`"", "--key-file", "`"$PrivateKeyPath`"") `
     -RedirectStandardOutput $OutLog `
     -RedirectStandardError $ErrLog `
     -PassThru
@@ -152,12 +183,16 @@ $Process = Start-Process `
 $Process.Id | Set-Content -LiteralPath $PidPath -Encoding ascii
 [ordered]@{
     pid = $Process.Id
+    python = $PythonExe
+    script = $ServerPath
+    stop_file = (Join-Path $Root 'runtime\monitor.stop')
+    parameters = $LaunchParameters
     started_utc = $RunStartedUtc.ToString("o")
     url = $Url
     external_url = if ($Port -eq 443) { "https://${PublicHost}/" } else { "https://${PublicHost}:$Port/" }
     stdout = $OutLog
     stderr = $ErrLog
-} | ConvertTo-Json | Set-Content -LiteralPath $CurrentRunPath -Encoding utf8
+} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $CurrentRunPath -Encoding utf8
 
 $Ready = $false
 for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
@@ -191,3 +226,4 @@ Write-Host $Url
 if ($OpenBrowser) {
     Start-Process $Url
 }
+} finally { $ControlLock.Dispose() }

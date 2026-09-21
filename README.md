@@ -216,6 +216,10 @@ are different, as described above.
 
 ## Control Room
 
+For startup before Windows sign-in and automatic recovery after a process crash,
+see [Windows reboot and crash recovery](docs/windows-recovery.md). Its watchdog
+preserves intentional Stop settings and never replays uncertain trades.
+
 ```powershell
 .\start_zhuorui_monitor.ps1 -OpenBrowser
 ```

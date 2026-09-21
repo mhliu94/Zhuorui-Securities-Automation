@@ -1,7 +1,17 @@
-param([ValidateSet('api', 'ui')][string]$Backend = 'api')
+param([ValidateSet('api', 'ui')][string]$Backend = 'api', [switch]$Recovery,
+      [string]$IntentRevision, [int]$ExpectedPid, [string]$ExpectedStartedUtc)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot 'listener_common.ps1')
+. (Join-Path $PSScriptRoot 'recovery_common.ps1')
+$ControlLock = Enter-ServiceControlLock $Root 'listener'
+try {
+if ($Recovery) {
+    if (-not $IntentRevision) { throw 'Recovery stop requires a current intent revision.' }
+    $Intent = Read-RecoveryIntent $Root 'api'
+    if (-not $Intent -or $Intent.revision -ne $IntentRevision) { return }
+}
+if ($Backend -eq 'api' -and -not $Recovery) { Set-RecoveryIntent $Root 'api' $false }
 $Paths = Get-ListenerPaths -ProjectRoot $Root -Backend $Backend
 $Tracked = Get-TrackedListener -Paths $Paths -Backend $Backend
 if (-not $Tracked) {
@@ -12,6 +22,8 @@ if (-not $Tracked) {
 if (-not $Tracked.Verified) {
     throw 'Listener PID points to an unverified process; it was left untouched.'
 }
+if ($Recovery -and ($Tracked.Pid -ne $ExpectedPid -or
+    $Tracked.Process.StartTime.ToUniversalTime().ToString('o') -ne $ExpectedStartedUtc)) { return }
 if ($Backend -eq 'api') {
     $StopFile = [string]$Tracked.Run.stop_file
     if (-not $StopFile -or -not [System.IO.Path]::IsPathRooted($StopFile)) {
@@ -28,3 +40,4 @@ if ($Backend -eq 'api') {
 }
 Remove-Item -LiteralPath $Paths.Pid, $Paths.Current -Force -ErrorAction SilentlyContinue
 Write-Host "Stopped Zhuorui $Backend listener with PID $($Tracked.Pid)."
+} finally { $ControlLock.Dispose() }

@@ -75,6 +75,9 @@ Each remote client must also trust `certs\zhuorui-monitor-cert.cer`, otherwise i
 
 ## Configuration
 
+For the **Restart protection** panel, unattended startup, persistent Stop behavior,
+and watchdog setup, see [Windows recovery](windows-recovery.md).
+
 The dashboard reuses `zhuorui_config.json`. These fields control the emulator integration and the optional public-host fallback:
 
 ```json
