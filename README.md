@@ -10,7 +10,7 @@ implementations read the same `zhuorui_config.json`. See [Linux UI setup](docs/l
 | API CLI | Import an app session, check authentication, query holdings, cash and today's orders. |
 | API login recovery | Re-login directly with the imported device identity, using the shared login credentials and Beijing-time delay policy. |
 | API trading listener | Kafka Buy/Sell Market, Limit, one-second timed-cancel and cancellation commands. |
-| API publications | Account details every 30 seconds, plus a queued publication after every order submission attempt and cancellation attempt. |
+| API publications | Account details and today's US Eastern order snapshots every 30 seconds, plus queued refreshes after submission and cancellation attempts. |
 | Control Room | Starts, stops and restarts the API listener; reports trading mode and publication status. |
 
 ## Project layout

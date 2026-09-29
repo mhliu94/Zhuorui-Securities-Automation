@@ -517,6 +517,41 @@ class ZhuoruiController:
         write_json(self.emulator_run_path, metadata)
         return result
 
+    @staticmethod
+    def _log_restart_event(source: str, action: str, state: str, message: str) -> None:
+        detail = re.sub(r"\s+", " ", str(message)).strip()
+        entry = (
+            f"{iso_utc(utc_now())} Restart action: source={source} "
+            f"action={action} state={state} message={json.dumps(detail)}"
+        )
+        stream = sys.stderr if state in {"failed", "cancelled"} else sys.stdout
+        print(entry, file=stream, flush=True)
+
+    def _run_restart_action(
+        self,
+        source: str,
+        action: str,
+        operation: Callable[[], ActionResult],
+    ) -> ActionResult:
+        self._log_restart_event(source, action, "started", "Action started.")
+        try:
+            result = operation()
+        except Exception as exc:
+            self._log_restart_event(
+                source,
+                action,
+                "failed",
+                f"Unexpected {type(exc).__name__}: {exc}",
+            )
+            raise
+        self._log_restart_event(
+            source,
+            action,
+            "succeeded" if result.ok else "failed",
+            result.message,
+        )
+        return result
+
     def public_config(self) -> dict[str, Any]:
         config = read_json(self.config_path)
         api = config.get("api") if isinstance(config.get("api"), dict) else {}
@@ -1348,44 +1383,78 @@ class ZhuoruiController:
         started_at: datetime,
         waiter: Callable[[float], bool],
     ) -> ActionResult:
+        self._log_restart_event(source, "restart", "started", f"Restart requested at {iso_utc(started_at)}.")
         self._record_restart_started(source, started_at)
 
-        listener_stop = self.stop_script()
+        def finish(result: ActionResult) -> ActionResult:
+            self._log_restart_event(
+                source,
+                "restart",
+                "succeeded" if result.ok else "failed",
+                result.message,
+            )
+            return self._record_restart_finished(result)
+
+        def wait_for(action: str, seconds: float) -> bool:
+            self._log_restart_event(source, action, "started", f"Waiting {seconds:g} seconds.")
+            try:
+                cancelled = waiter(seconds)
+            except Exception as exc:
+                self._log_restart_event(
+                    source,
+                    action,
+                    "failed",
+                    f"Unexpected {type(exc).__name__}: {exc}",
+                )
+                raise
+            self._log_restart_event(
+                source,
+                action,
+                "cancelled" if cancelled else "succeeded",
+                "Wait was cancelled." if cancelled else "Wait completed.",
+            )
+            return cancelled
+
+        listener_stop = self._run_restart_action(source, "stop_listener", self.stop_script)
         if not listener_stop.ok:
-            return self._record_restart_finished(
+            return finish(
                 ActionResult(False, f"Restart failed while stopping the listener: {listener_stop.message}")
             )
 
-        emulator_stop = self.stop_emulator()
+        emulator_stop = self._run_restart_action(source, "stop_emulator", self.stop_emulator)
         if not emulator_stop.ok:
-            return self._record_restart_finished(
+            return finish(
                 ActionResult(False, f"Restart failed while stopping the emulator: {emulator_stop.message}")
             )
-        if waiter(EMULATOR_STOP_SETTLE_SECONDS):
-            return self._record_restart_finished(ActionResult(False, "The restart was cancelled before emulator start."))
+        if wait_for("wait_after_emulator_stop", EMULATOR_STOP_SETTLE_SECONDS):
+            return finish(ActionResult(False, "The restart was cancelled before emulator start."))
 
-        emulator_start = self._start_emulator()
+        emulator_start = self._run_restart_action(source, "start_emulator", self._start_emulator)
         if not emulator_start.ok:
-            return self._record_restart_finished(
+            return finish(
                 ActionResult(False, f"Restart failed while starting the emulator: {emulator_start.message}")
             )
-        if waiter(EMULATOR_BOOT_SETTLE_SECONDS):
-            return self._record_restart_finished(
+        if wait_for("wait_for_emulator_boot", EMULATOR_BOOT_SETTLE_SECONDS):
+            return finish(
                 ActionResult(False, "The restart was cancelled while waiting for the emulator to boot.")
             )
 
-        foreground = self._foreground_zhuorui(waiter)
+        foreground = self._run_restart_action(
+            source,
+            "foreground_zhuorui",
+            lambda: self._foreground_zhuorui(waiter),
+        )
         if not foreground.ok:
-            final_stop = self.stop_emulator()
+            final_stop = self._run_restart_action(source, "stop_emulator_after_failure", self.stop_emulator)
             stop_detail = "" if final_stop.ok else f" Final emulator stop also failed: {final_stop.message}"
-            return self._record_restart_finished(ActionResult(False, foreground.message + stop_detail))
+            return finish(ActionResult(False, foreground.message + stop_detail))
 
-        listener_start = self.start_script()
+        listener_start = self._run_restart_action(source, "start_listener", self.start_script)
         if not listener_start.ok:
-            return self._record_restart_finished(
+            return finish(
                 ActionResult(False, f"Zhuorui was foregrounded, but the listener could not start: {listener_start.message}")
             )
-        return self._record_restart_finished(
+        return finish(
             ActionResult(True, "The emulator, Zhuorui application, and listener restarted successfully.")
         )
 

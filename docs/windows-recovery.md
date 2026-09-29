@@ -61,6 +61,32 @@ Relevant Windows documentation:
 
 ## Start, Stop, and recovery
 
+### Desktop controls
+
+After preparing the independent Python runtime above, create desktop shortcuts:
+
+```powershell
+.\scripts\windows\install_zhuorui_desktop.ps1
+```
+
+**Zhuorui Monitor** starts the Control Room if needed and opens the browser.
+**Restart Zhuorui Monitor** gracefully stops and restarts it with its saved
+settings, then opens the browser. These controls use demand-only Windows tasks
+under the signed-in account, outside the Codex app. They need no Codex session
+or Windows password and do not add automatic startup or recovery. Use the
+Control Room's API controls to start, stop, or restart the trading listener.
+
+The tasks validate session decryption, independent Python, and absence of Codex
+package identity before starting anything. Failures show a dialog with the
+`logs/desktop_control_*.log` location. Desktop tasks require this account to be
+signed in; use the watchdog installation above for unattended boot recovery.
+
+An already running process keeps its original launch context. After initial
+setup, use **Restart Zhuorui Monitor** and gracefully restart the API listener
+once through the Control Room to move both onto the independent runtime.
+
+### Service state
+
 - **Stop** saves a persistent paused state before requesting process shutdown.
   It works even if the component already crashed. It stays paused across reboot.
 - **Start** saves the desired running state and resumes recovery. A watchdog

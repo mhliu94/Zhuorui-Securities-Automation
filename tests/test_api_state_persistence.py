@@ -139,6 +139,8 @@ class HoldingsStateFailureTests(unittest.TestCase):
         self.state = ListenerState(root / "state.json", last_error=None)
         self.state.update(running=True)
         self.client = Mock()
+        self.client.query.return_value = {"code": "000000", "data": []}
+        self.client.query_orders_for_date.return_value = {"code": "000000", "data": []}
         self.settings = SimpleNamespace(holdings_interval_seconds=3600, holdings_topic="synthetic",
                                         live_orders_enabled=False, login_retry_seconds=300)
         api = SimpleNamespace(session_file=root / "session.dpapi")

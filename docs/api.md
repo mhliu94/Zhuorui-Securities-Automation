@@ -80,6 +80,7 @@ Both implementations use `zhuorui/common/config.py` and the existing private
     "expected_user_id": null,
     "session_file": "runtime/api/session.dpapi",
     "journal_file": "runtime/api/commands.sqlite3",
+    "order_snapshot_journal_file": "runtime/api/commands.order-snapshots.sqlite3",
     "state_file": "runtime/api/listener-state.json",
     "stop_file": "runtime/api/listener.stop",
     "capture_file": "api_research/private/zhuorui-flows.mitm",
@@ -195,6 +196,43 @@ API command results always publish to the configured `order-status` topic,
 including disabled, rejected, duplicate and unknown results. The legacy
 `kafka.publish_order_status` switch does not disable API results. Broker
 acknowledgement does not prove a fill or successful cancellation.
+
+Every holdings query also triggers a read of today's orders on the same
+background publisher, for startup/periodic, submission, cancellation and
+login-recovery refreshes. It reads both `get_today_entrust` and `get_all_entrust`
+with an explicit `America/New_York` calendar-day window, then filters each
+original `entrustTime` to that Eastern date. This includes completed, canceled,
+rejected and open orders. The window respects daylight saving; if a read crosses
+Eastern midnight, the next refresh retries for the new day. Successful broker
+responses with missing/null order data are empty lists, not query errors.
+
+The publisher sends a full KTrader order-status v1 snapshot per order to
+`kafka.order_status_topic` (default `order-status`) with the compact JSON key
+`[account_id,order_id]`. `orderTxnReference` is the immutable order ID; the
+shared account labels are preserved. Broker order enums are mapped to KTrader
+statuses; unmapped states are `UNKNOWN`. Creation timestamps come from the
+broker and update timestamps record the source observation. Average fill price
+is derived from a complete execution list when available; `costPrice` is a cost
+basis and is not treated as average fill price.
+
+Full snapshots are republished each refresh. A separate SQLite journal persists
+sequences and payloads before sending. Unchanged state and delivery retries reuse
+the same sequence and exact payload; changed state increments the sequence.
+The full batch is saved before Kafka sends, and unacknowledged snapshots are
+retried after restart or Eastern midnight, even if later queries no longer
+return the order. KTrader filters prior-day retries from today's view.
+Preserve this journal across restarts. By default it sits beside the command
+journal with the suffix `.order-snapshots.sqlite3`; override its location with
+`api.order_snapshot_journal_file`. An empty day sends no order messages.
+
+Order-query or publication failures are recorded independently in the listener
+status (`last_orders_error`, `last_orders_query`, `last_orders_publish`,
+`last_orders_count`, `orders_publish_count`) and logs. They do not suppress an
+otherwise successful account snapshot or block command/FOK processing. The next
+refresh retries, and authentication failures use the existing login recovery.
+Order snapshots populate KTrader's new read-only Order UI. Existing command
+result events on this topic keep their original format; KTrader counts/skips
+those as invalid snapshots rather than inferring broker orders from them.
 
 ## Kafka command contract
 

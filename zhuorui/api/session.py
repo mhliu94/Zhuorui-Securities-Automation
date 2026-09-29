@@ -21,6 +21,7 @@ READ_PATHS = {
     "holdings": "/as_trade/api/order/v1/get_hold_list",
     "cash": "/as_trade/api/funds/v1/info",
     "orders": "/as_trade/api/order/v1/get_today_entrust",
+    "order-history": "/as_trade/api/order/v1/get_all_entrust",
     "account": "/as_trade/api/account/v1/info",
     "trade-auth": "/as_trade/api/auth/v1/current_auth_info",
 }

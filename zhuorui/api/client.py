@@ -10,11 +10,12 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import re
 
 from .errors import ApiError, SessionError, SessionExpired, LoggedInElsewhere, BrokerRejected, OrderOutcomeUnknown
-from .market_data import ORDER_BOOK_PATH, MARKET_STATUS_PATH
+from .market_data import NEW_YORK, ORDER_BOOK_PATH, MARKET_STATUS_PATH
 from .orders import plan_order, plan_cancel
 from .session import HOST, READ_PATHS
 from .signing import canonical, signature
@@ -59,7 +60,21 @@ class ApiClient:
     def query(self, name):
         if name not in READ_PATHS:
             raise ApiError("This runtime permits only named account queries.")
+        if name == "order-history":
+            raise ApiError("Order history requires an explicit Eastern date; use query_orders_for_date.")
         return self._request(READ_PATHS[name], {})
+
+    def query_orders_for_date(self, day):
+        """Read all orders for one US Eastern calendar day, including closed orders."""
+        if type(day) is not date:
+            raise ApiError("Order history requires a date object, without a time component.")
+        try:
+            start = datetime.combine(day, datetime.min.time(), tzinfo=NEW_YORK)
+            end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=NEW_YORK)
+            start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
+        except (OverflowError, OSError, ValueError):
+            raise ApiError("Order history date cannot be represented as an Eastern day window.") from None
+        return self._request(READ_PATHS["order-history"], {"startDate": start_ms, "endDate": end_ms})
 
     def submit_order(self, symbol, side, quantity, kind, *, price=None, allow_pre_post=None):
         plan = plan_order(symbol, side, quantity, kind, price=price, allow_pre_post=allow_pre_post)

@@ -19,6 +19,8 @@ class PublicationLoggingTests(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.state = ListenerState(Path(folder.name) / "state.json", last_error=None)
         self.client, self.producer = Mock(), Mock()
+        self.client.query.return_value = {"code": "000000", "data": []}
+        self.client.query_orders_for_date.return_value = {"code": "000000", "data": []}
         self.publisher = HoldingsPublisher({}, SimpleNamespace(live_orders_enabled=True, holdings_topic="test"),
                                            self.producer, lambda: self.client, self.state)
         self.enterContext(patch("zhuorui.api.snapshot.account_snapshot", return_value={

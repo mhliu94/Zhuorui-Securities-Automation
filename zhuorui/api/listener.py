@@ -133,6 +133,13 @@ class ClientProvider:
             self.state.holdings_recovered(**values, session_status="valid")
             return True
 
+    def report_orders_success(self, client, **values):
+        with self.lock:
+            if client is not self.cached or self.schedule.detected_at is not None:
+                return False
+            self.state.orders_recovered(**values, session_status="valid")
+            return True
+
     def recovery_message(self):
         with self.lock:
             return self._waiting_message() if self.schedule.detected_at is not None else None
@@ -278,7 +285,8 @@ def _run_listener(config_path):
     state = ListenerState(settings.state_file, backend="api", running=True,
                           started_at=utc_now(), live_orders_enabled=settings.live_orders_enabled,
                           session_status="unchecked", holdings_interval_seconds=settings.holdings_interval_seconds,
-                          last_holdings_publish=None, last_error=None,
+                          last_holdings_publish=None, last_orders_publish=None,
+                          last_orders_error=None, orders_publish_count=0, last_error=None,
                           order_submission_delay_seconds=ORDER_SUBMISSION_DELAY_SECONDS,
                           post_order_holdings_delay_seconds=POST_ORDER_HOLDINGS_DELAY_SECONDS)
     lock_file = settings.journal_file.with_suffix(settings.journal_file.suffix + ".lock")

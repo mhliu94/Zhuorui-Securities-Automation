@@ -406,6 +406,49 @@ class ZhuoruiControllerTests(unittest.TestCase):
         self.assertEqual(metadata["last_restart_utc"], "2026-08-15T00:01:00Z")
         self.assertEqual(metadata["last_restart_state"], "succeeded")
 
+    def test_scheduled_restart_logs_each_action_and_final_success(self):
+        now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
+        controller = ZhuoruiController(self.root, backend="ui", runner=FakeRunner())
+        controller.stop_script = Mock(return_value=ActionResult(True, "listener stopped"))
+        controller.stop_emulator = Mock(return_value=ActionResult(True, "emulator stopped"))
+        controller._start_emulator = Mock(return_value=ActionResult(True, "emulator started"))
+        controller._foreground_zhuorui = Mock(return_value=ActionResult(True, "Zhuorui foregrounded"))
+        controller.start_script = Mock(return_value=ActionResult(True, "listener started"))
+
+        with patch("builtins.print") as printer:
+            result = controller.scheduled_restart_if_due(now, waiter=lambda _seconds: False)
+
+        self.assertTrue(result.ok)
+        entries = [str(call.args[0]) for call in printer.call_args_list]
+        expected_states = (
+            "action=stop_listener state=succeeded",
+            "action=stop_emulator state=succeeded",
+            "action=wait_after_emulator_stop state=succeeded",
+            "action=start_emulator state=succeeded",
+            "action=wait_for_emulator_boot state=succeeded",
+            "action=foreground_zhuorui state=succeeded",
+            "action=start_listener state=succeeded",
+            "action=restart state=succeeded",
+        )
+        for expected in expected_states:
+            self.assertTrue(any(expected in entry for entry in entries), expected)
+
+    def test_scheduled_restart_logs_failed_action_and_final_failure(self):
+        now = datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc)
+        controller = ZhuoruiController(self.root, backend="ui", runner=FakeRunner())
+        controller.stop_script = Mock(return_value=ActionResult(True, "listener stopped"))
+        controller.stop_emulator = Mock(return_value=ActionResult(False, "ADB unavailable"))
+        controller._start_emulator = Mock()
+
+        with patch("builtins.print") as printer:
+            result = controller.scheduled_restart_if_due(now, waiter=lambda _seconds: False)
+
+        self.assertFalse(result.ok)
+        entries = [str(call.args[0]) for call in printer.call_args_list]
+        self.assertTrue(any("action=stop_emulator state=failed" in entry for entry in entries))
+        self.assertTrue(any("action=restart state=failed" in entry for entry in entries))
+        controller._start_emulator.assert_not_called()
+
     def test_scheduled_restart_guard_uses_web_ui_attempt_time(self):
         now = datetime(2026, 8, 15, 0, 30, tzinfo=timezone.utc)
         self.write_json(

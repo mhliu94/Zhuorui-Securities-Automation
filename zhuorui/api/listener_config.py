@@ -27,6 +27,7 @@ class ListenerSettings:
     auto_import_session: bool
     auto_login_enabled: bool = True
     login_retry_seconds: float = 300
+    order_snapshot_journal_file: Path | None = None
 
 
 def load_listener_settings(config_path, config):
@@ -59,6 +60,7 @@ def load_listener_settings(config_path, config):
     # Each account must see every command. A shared consumer group would assign
     # another account's command to one consumer, which then filters it away.
     group = text(api.get("kafka_group_id"), text(kafka.get("group_id"), "zhuorui-trading") + f".api.account-{account_number}")
+    journal_file = path("journal_file", "runtime/api/commands.sqlite3")
     return ListenerSettings(
         bootstrap_servers=text(kafka.get("bootstrap_servers") or kafka.get("server") or config.get("kafka_bootstrap_servers")),
         command_topic=text(kafka.get("command_topic"), "trading-commands"),
@@ -69,9 +71,11 @@ def load_listener_settings(config_path, config):
         poll_seconds=min(number(kafka, "poll_seconds", 1), 1),
         command_max_age_seconds=number(api, "command_max_age_seconds", 120),
         live_orders_enabled=config_bool(api, "live_orders_enabled", True) and enabled,
-        journal_file=path("journal_file", "runtime/api/commands.sqlite3"),
+        journal_file=journal_file,
         state_file=path("state_file", "runtime/api/listener-state.json"),
         stop_file=path("stop_file", "runtime/api/listener.stop"),
         auto_import_session=config_bool(api, "auto_import_session", False),
         auto_login_enabled=config_bool(api, "auto_login_enabled", True),
-        login_retry_seconds=number(api, "login_retry_seconds", 300))
+        login_retry_seconds=number(api, "login_retry_seconds", 300),
+        order_snapshot_journal_file=path("order_snapshot_journal_file",
+                                         journal_file.with_suffix(".order-snapshots.sqlite3")))

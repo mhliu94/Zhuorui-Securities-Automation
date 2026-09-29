@@ -18,9 +18,13 @@ CANCELLABLE_STATES = {"0", "1", "2", "A", "H", "7", "E", "ACK", "PENDING_NEW", "
 
 
 def order_rows(response):
-    if not isinstance(response, dict) or response.get("code") != "000000" or not isinstance(response.get("data"), list):
+    if not isinstance(response, dict) or response.get("code") != "000000":
         raise ApiError("Today's orders returned an unsupported response shape.")
-    rows = response["data"]
+    rows = response.get("data")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ApiError("Today's orders returned an unsupported response shape.")
     if not all(isinstance(row, dict) for row in rows):
         raise ApiError("Today's orders returned an invalid record.")
     return rows

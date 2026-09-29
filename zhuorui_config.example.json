@@ -45,6 +45,7 @@
     "command_max_age_seconds": 120,
     "quote_max_age_seconds": 30,
     "journal_file": "runtime/api/commands.sqlite3",
+    "order_snapshot_journal_file": "runtime/api/commands.order-snapshots.sqlite3",
     "state_file": "runtime/api/listener-state.json",
     "stop_file": "runtime/api/listener.stop"
   },
