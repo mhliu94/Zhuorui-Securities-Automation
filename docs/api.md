@@ -216,9 +216,16 @@ The publisher sends a full KTrader order-status v1 snapshot per order to
 `[account_id,order_id]`. `orderTxnReference` is the immutable order ID; the
 shared account labels are preserved. Broker order enums are mapped to KTrader
 statuses; unmapped states are `UNKNOWN`. Creation timestamps come from the
-broker and update timestamps record the source observation. Average fill price
-is derived from a complete execution list when available; `costPrice` is a cost
-basis and is not treated as average fill price.
+broker and update timestamps record the source observation. For an order with
+executed shares but no complete execution breakdown in the list response, the
+publisher reads `/as_trade/api/order/v2/entrust_detail` using its transaction
+reference and original creation timestamp. It validates the returned identity
+and computes average fill price from `bargainList[].businessPrice`, weighted by
+`businessAmount`, for both Limit and Market orders. The execution quantities must
+cover the cumulative filled quantity. `entrustPrice` is the limit price and
+`costPrice` is not used as an execution-price substitute. Stale, incomplete or
+failed detail reads leave the previously published batch intact and retry on the
+next refresh; holdings publication continues independently.
 
 Full snapshots are republished each refresh. A separate SQLite journal persists
 sequences and payloads before sending. Unchanged state and delivery retries reuse

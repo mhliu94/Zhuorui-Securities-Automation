@@ -2,6 +2,7 @@
 import json
 import heapq
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import queue
 import threading
@@ -162,7 +163,7 @@ class HoldingsPublisher:
         """
         from .execution import order_rows
         from .market_data import NEW_YORK
-        from .order_snapshot import order_snapshots
+        from .order_snapshot import order_snapshots, order_detail_snapshot
         from .order_publication import OrderPublicationJournal
         from .session import binding
 
@@ -191,6 +192,20 @@ class HoldingsPublisher:
             stage = "order_snapshot"
             snapshots = order_snapshots(self.config, {"code": "000000", "data": list(merged.values())},
                                         now=observed_at)
+            for index, snapshot in enumerate(snapshots):
+                if snapshot["filled_quantity"] > 0 and snapshot["average_fill_price"] is None:
+                    stage = "order_detail_query"
+                    row = merged[snapshot["order_id"]]
+                    detail = client.query_order_detail(snapshot["order_id"], int(Decimal(str(row["entrustTime"]))))
+                    stage = "order_detail_snapshot"
+                    snapshots[index] = order_detail_snapshot(
+                        self.config, detail, snapshot,
+                        now=datetime.fromtimestamp(self.wall(), timezone.utc))
+            observed_at = datetime.fromtimestamp(self.wall(), timezone.utc)
+            if observed_at.astimezone(NEW_YORK).date() != day:
+                raise ApiError("Eastern date changed during order reads; the next refresh will retry.")
+            for snapshot in snapshots:
+                snapshot["updated_at"] = observed_at.isoformat()
             stage = "order_journal"
             path = getattr(self.settings, "order_snapshot_journal_file", None)
             if self.order_journal is None and (snapshots or path is not None and Path(path).exists()):

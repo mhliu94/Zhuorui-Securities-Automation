@@ -38,6 +38,12 @@ class OrderPublishingTests(unittest.TestCase):
         self.client = Mock()
         self.client.query.side_effect = lambda name: {"code": "000000", "data": self.current if name == "orders" else {}}
         self.client.query_orders_for_date.side_effect = lambda day: {"code": "000000", "data": self.history}
+        def detail(reference, entrust_time):
+            row = next(row for row in self.current + self.history
+                       if row["orderTxnReference"] == reference and row["entrustTime"] == entrust_time)
+            return {"code": "000000", "data": {**row, "bargainList": [
+                {"businessAmount": row["businessAmount"], "businessPrice": "12.125"}]}}
+        self.client.query_order_detail.side_effect = detail
         self.producer = Mock()
         self.publisher = self.make_publisher()
         self.addCleanup(self.publisher.close)
@@ -102,6 +108,69 @@ class OrderPublishingTests(unittest.TestCase):
         self.publisher.publish("periodic")
         self.assertEqual(len(self.events()), 1)
         self.assertEqual(self.events()[0].args[1]["status"], "FILLED")
+        self.assertEqual(self.events()[0].args[1]["average_fill_price"], 12.125)
+        self.client.query_order_detail.assert_called_once_with("broker-order", self.history[0]["entrustTime"])
+
+    def test_list_without_execution_prices_uses_detail_for_limit_and_market_orders(self):
+        for kind in ("LO", "MO"):
+            with self.subTest(kind=kind):
+                self.current = [order(kind, status="8", filled=10)]
+                self.current[0]["entrustProp"] = kind
+                self.publisher.publish("periodic")
+                event = self.events()[-1].args[1]
+                self.assertEqual(event["average_fill_price"], 12.125)
+                self.assertEqual(event["filled_quantity"], 10)
+                self.assertEqual(event["order_type"], "LIMIT" if kind == "LO" else "MARKET")
+                self.assertEqual(event["sequence"], 1)
+
+    def test_unfilled_or_complete_list_does_not_query_detail(self):
+        self.publisher.publish("periodic")
+        self.current = [order(status="8", filled=10)]
+        self.current[0]["bargainList"] = [{"businessAmount": 10, "businessPrice": 12}]
+        self.publisher.publish("periodic")
+        self.client.query_order_detail.assert_not_called()
+        self.assertEqual(self.events()[-1].args[1]["average_fill_price"], 12)
+
+    def test_detail_failure_preserves_known_fill_and_retries_without_blocking_holdings(self):
+        self.current = [order(status="8", filled=10)]
+        self.publisher.publish("periodic")
+        original = deepcopy(self.events()[-1].args[1])
+        self.client.query_order_detail.side_effect = ApiError("Order detail unavailable")
+        self.publisher.publish("periodic")
+        self.assertEqual(self.publisher.published, 2)
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(self.state.values["last_orders_error"], "Order detail unavailable")
+        self.client.query_order_detail.side_effect = None
+        self.client.query_order_detail.return_value = {"code": "000000", "data": self.current[0]}
+        self.publisher.publish("periodic")
+        self.assertEqual(len(self.events()), 1)
+        self.assertIn("complete execution prices", self.state.values["last_orders_error"])
+        self.client.query_order_detail.return_value["data"] = {
+            **self.current[0], "bargainList": [{"businessAmount": 10, "businessPrice": "12.125"}]}
+        self.publisher.publish("periodic")
+        self.assertEqual(canonical(self.events()[-1].args[1]), canonical(original))
+        self.assertIsNone(self.state.values["last_orders_error"])
+        self.assertEqual(self.publisher.published, 4)
+
+    def test_backfill_increments_existing_null_price_sequence(self):
+        from zhuorui.api.order_publication import OrderPublicationJournal
+        from zhuorui.api.order_snapshot import order_snapshots
+        from zhuorui.api.session import binding
+        self.current = [order(status="8", filled=10)]
+        journal = OrderPublicationJournal(self.settings.order_snapshot_journal_file, binding(self.config))
+        try:
+            initial = journal.prepare(order_snapshots(
+                self.config, {"code": "000000", "data": self.current}, now=NOW)[0])
+            self.assertIsNone(initial["average_fill_price"])
+            self.assertEqual(initial["sequence"], 1)
+            journal.ack(initial)
+        finally:
+            journal.close()
+        self.publisher.publish("periodic")
+        event = self.events()[-1].args[1]
+        self.assertEqual(event["sequence"], 2)
+        self.assertEqual(event["average_fill_price"], 12.125)
+        self.assertEqual(self.events()[-1].kwargs["key"], b'["synthetic-account","broker-order"]')
 
     def test_current_state_wins_history_overlap_and_duplicates_fail(self):
         calls = Mock()
@@ -245,6 +314,29 @@ class OrderPublishingTests(unittest.TestCase):
         self.publisher.publish("periodic")
         self.assertEqual(self.events(), [])
         self.assertIn("Eastern date changed", self.state.values["last_orders_error"])
+
+    def test_midnight_during_detail_read_does_not_publish_previous_day(self):
+        before = datetime(2026, 9, 30, 3, 59, 59, tzinfo=timezone.utc)
+        after = before + timedelta(seconds=2)
+        self.current = [order(status="8", filled=10)]
+        self.publisher.wall = Mock(side_effect=[before.timestamp(), before.timestamp(), after.timestamp()])
+        self.publisher.publish("periodic")
+        self.assertEqual(self.events(), [])
+        self.assertFalse(self.settings.order_snapshot_journal_file.exists())
+        self.assertEqual(self.publisher.published, 1)
+        self.assertIn("today's requested order", self.state.values["last_orders_error"])
+
+    def test_detail_mismatch_prevents_sending_any_order_in_batch(self):
+        self.current = [order("unfilled"), order("filled", status="8", filled=10)]
+        self.client.query_order_detail.side_effect = None
+        self.client.query_order_detail.return_value = {"code": "000000", "data": {
+            **self.current[1], "orderTxnReference": "different-order",
+            "bargainList": [{"businessAmount": 10, "businessPrice": 12}]}}
+        self.publisher.publish("periodic")
+        self.assertEqual(self.events(), [])
+        self.assertFalse(self.settings.order_snapshot_journal_file.exists())
+        self.assertIn("identity does not match", self.state.values["last_orders_error"])
+        self.assertEqual(self.publisher.published, 1)
 
     def test_journal_path_follows_custom_command_journal_and_supports_override(self):
         self.assertEqual(self.settings.order_snapshot_journal_file,

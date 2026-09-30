@@ -5,7 +5,7 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from zhuorui.api.errors import ApiError
-from zhuorui.api.order_snapshot import order_snapshots
+from zhuorui.api.order_snapshot import order_snapshots, order_detail_snapshot
 from zhuorui.api.signing import canonical
 
 
@@ -75,6 +75,61 @@ class OrderSnapshotTests(unittest.TestCase):
         row = order(entrustStatus="7", businessAmount=50,
                     bargainList=[{"businessAmount": 20, "businessPrice": 200}])
         self.assertIsNone(self.snapshot(row)["average_fill_price"])
+
+    def test_detail_supplies_execution_price_for_limit_and_market_orders(self):
+        for kind in ("LO", "MO"):
+            with self.subTest(kind=kind):
+                row = order(entrustProp=kind, entrustStatus="8", businessAmount=100)
+                listed = self.snapshot(row)
+                detailed = {**row, "bargainList": [
+                    {"businessAmount": 100, "businessPrice": "199.9288", "businessBalance": "19992.88"}]}
+                detailed.pop("timeInForce")
+                detailed.pop("ts")
+                snapshot = order_detail_snapshot(CONFIG, {"code": "000000", "data": detailed}, listed, now=NOW)
+                self.assertEqual(snapshot["average_fill_price"], Decimal("199.9288"))
+                self.assertEqual(snapshot["status"], "FILLED")
+                self.assertEqual(snapshot["currency"], "USD")
+                self.assertEqual(snapshot["time_in_force"], "DAY")
+                self.assertNotEqual(snapshot["average_fill_price"], row["entrustPrice"])
+                self.assertNotEqual(snapshot["average_fill_price"], row["costPrice"])
+
+    def test_detail_can_advance_partial_fills_to_complete_with_weighted_average(self):
+        row = order(entrustStatus="7", businessAmount=20)
+        detailed = {**row, "entrustStatus": "8", "businessAmount": 100, "bargainList": [
+            {"businessAmount": 20, "businessPrice": 199},
+            {"businessAmount": 80, "businessPrice": 200}]}
+        snapshot = order_detail_snapshot(CONFIG, {"code": "000000", "data": detailed}, self.snapshot(row), now=NOW)
+        self.assertEqual(snapshot["average_fill_price"], Decimal("199.8"))
+        self.assertEqual(snapshot["filled_quantity"], 100)
+        self.assertEqual(snapshot["status"], "FILLED")
+
+    def test_detail_rejects_wrong_identity_and_stale_or_incomplete_executions(self):
+        row = order(entrustStatus="7", businessAmount=50)
+        listed = self.snapshot(row)
+        detailed = {**row, "bargainList": [{"businessAmount": 50, "businessPrice": 200}]}
+        changes = (
+            {"orderTxnReference": "different-order"}, {"entrustTime": row["entrustTime"] - 1},
+            {"code": "OTHER"}, {"entrustBs": "2"}, {"businessAmount": 40,
+                "bargainList": [{"businessAmount": 40, "businessPrice": 200}]},
+            {"bargainList": None}, {"bargainList": []},
+            {"bargainList": [{"businessAmount": 20, "businessPrice": 200}]},
+        )
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(ApiError):
+                order_detail_snapshot(CONFIG, {"code": "000000", "data": {**detailed, **change}}, listed, now=NOW)
+        for result in (None, {}, {"code": "000102", "data": detailed},
+                       {"code": "000000"}, {"code": "000000", "data": []}):
+            with self.subTest(result=result), self.assertRaises(ApiError):
+                order_detail_snapshot(CONFIG, result, listed, now=NOW)
+
+    def test_detail_cannot_reopen_terminal_order_with_same_cumulative_fill(self):
+        for state in ("6", "F"):
+            with self.subTest(state=state):
+                row = order(entrustStatus=state, businessAmount=50)
+                detailed = {**row, "entrustStatus": "7", "bargainList": [
+                    {"businessAmount": 50, "businessPrice": 200}]}
+                with self.assertRaisesRegex(ApiError, "stale order status"):
+                    order_detail_snapshot(CONFIG, {"code": "000000", "data": detailed}, self.snapshot(row), now=NOW)
 
     def test_nonterminating_weighted_average_is_finite_and_serializable(self):
         row = order(entrustStatus="7", businessAmount=3, bargainList=[

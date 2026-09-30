@@ -1,6 +1,7 @@
 """Offline Eastern-day order reads and empty-order cancellation handling."""
 import base64
 from datetime import date, datetime, timezone
+from decimal import Decimal
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,10 +12,10 @@ from unittest.mock import Mock
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from tests.test_api import FakeOpener, KEY, SETTINGS, session
-from zhuorui.api.client import ApiClient
+from tests.test_api import FakeOpener, KEY, Reply, SETTINGS, session
+from zhuorui.api.client import ApiClient, ORDER_DETAIL_PATH
 from zhuorui.api.commands import CancelCommand
-from zhuorui.api.errors import ApiError, SessionExpired
+from zhuorui.api.errors import ApiError, LoggedInElsewhere, OrderOutcomeUnknown, SessionExpired
 from zhuorui.api.execution import CommandExecutor, cancel_references, order_rows
 from zhuorui.api.journal import CommandJournal
 from zhuorui.api.session import READ_PATHS
@@ -143,6 +144,115 @@ class EmptyOrderResponseTests(unittest.TestCase):
                     self.assertEqual(emit.call_args.args[1], "no_action")
                 finally:
                     journal.close()
+
+
+class OrderDetailReadTests(unittest.TestCase):
+    reference = "synthetic-detail-ref"
+    created = utc_ms(2026, 9, 29, 16)
+    now = utc_ms(2026, 9, 29, 20)
+
+    def client(self, response=None):
+        response = response if response is not None else {
+            "code": "000000", "data": {"orderTxnReference": self.reference,
+                                      "entrustTime": self.created, "entrustStatus": "8"}}
+        opener = FakeOpener(response)
+        return ApiClient(session(), SETTINGS, opener=opener, now=lambda: self.now / 1000), opener
+
+    def assert_only_detail_read(self, opener):
+        self.assertEqual(len(opener.calls), 1)
+        request, options = opener.calls[0]
+        self.assertEqual(request.full_url,
+                         "https://backendpro.zr.hk/as_trade/api/order/v2/entrust_detail")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(options["timeout"], SETTINGS.request_timeout_seconds)
+        return request
+
+    def test_exact_signed_detail_fields_and_read_only_route(self):
+        client, opener = self.client()
+        response = client.query_order_detail(self.reference, self.created)
+        self.assertEqual(response["data"]["entrustStatus"], "8")
+        request = self.assert_only_detail_read(opener)
+        body = json.loads(request.data)
+        signature = base64.b64decode(body.pop("sign"))
+        self.assertEqual(body, {"orderTxnReference": self.reference, "entrustTime": self.created,
+                                "timeStamp": self.now})
+        self.assertIs(type(body["entrustTime"]), int)
+        KEY.public_key().verify(signature, canonical(body), padding.PKCS1v15(), hashes.SHA1())
+        self.assertNotIn(ORDER_DETAIL_PATH, READ_PATHS.values())
+        with self.assertRaisesRegex(ApiError, "Unsupported broker operation"):
+            client._request(ORDER_DETAIL_PATH, {}, write=True)
+        self.assert_only_detail_read(opener)
+
+    def test_invalid_reference_fails_before_transport(self):
+        for reference in (None, True, 123, "", " ref", "ref ", "two refs", "ref\ttext",
+                          "ref\ntext", "ref\0text", "ref\x7ftext", "ref\x85text",
+                          "ref\u00a0text", "ref\ud800text", "r" * 257):
+            with self.subTest(reference=reference):
+                client, opener = self.client()
+                with self.assertRaisesRegex(ApiError, "transaction reference"):
+                    client.query_order_detail(reference, self.created)
+                self.assertEqual(opener.calls, [])
+
+    def test_invalid_creation_time_fails_before_transport(self):
+        for stamp in (None, True, False, 0, -1, str(self.created), float(self.created),
+                      Decimal(self.created), 253402300800000, 1 << 63):
+            with self.subTest(stamp=stamp):
+                client, opener = self.client()
+                with self.assertRaisesRegex(ApiError, "Unix millisecond creation time"):
+                    client.query_order_detail(self.reference, stamp)
+                self.assertEqual(opener.calls, [])
+
+    def test_supported_timestamp_and_reference_boundaries(self):
+        for stamp in (1, 253402300799999):
+            with self.subTest(stamp=stamp):
+                client, opener = self.client()
+                client.query_order_detail("r" * 256, stamp)
+                body = json.loads(self.assert_only_detail_read(opener).data)
+                self.assertEqual(body["entrustTime"], stamp)
+                self.assertEqual(body["orderTxnReference"], "r" * 256)
+
+    def test_generic_detail_name_or_path_requires_typed_fields(self):
+        client, opener = self.client()
+        for name in ("order-detail", ORDER_DETAIL_PATH):
+            with self.subTest(name=name), self.assertRaises(ApiError):
+                client.query(name)
+        self.assertEqual(opener.calls, [])
+
+    def test_session_failures_do_not_retry_or_authenticate(self):
+        for code, exception in (("000102", SessionExpired), ("000112", LoggedInElsewhere)):
+            with self.subTest(code=code):
+                client, opener = self.client({"code": code})
+                with self.assertRaises(exception):
+                    client.query_order_detail(self.reference, self.created)
+                self.assert_only_detail_read(opener)
+
+    def test_malformed_response_fails_as_read_error_without_retry(self):
+        for response in ([], {}, {"code": True}, {"code": 0}, {"code": "invalid"}):
+            with self.subTest(response=response):
+                client, opener = self.client(response)
+                with self.assertRaises(ApiError) as caught:
+                    client.query_order_detail(self.reference, self.created)
+                self.assertNotIsInstance(caught.exception, OrderOutcomeUnknown)
+                self.assert_only_detail_read(opener)
+
+    def test_duplicate_response_keys_are_rejected_without_retry(self):
+        client, opener = self.client()
+        def reply(request, **options):
+            opener.calls.append((request, options))
+            return Reply(b'{"code":"000000","data":{},"data":{}}')
+        opener.open = reply
+        with self.assertRaisesRegex(ApiError, "invalid JSON"):
+            client.query_order_detail(self.reference, self.created)
+        self.assert_only_detail_read(opener)
+
+    def test_timeout_is_read_error_without_retry(self):
+        client, opener = self.client()
+        opener.open = Mock(side_effect=TimeoutError("synthetic-private-timeout"))
+        with self.assertRaises(ApiError) as caught:
+            client.query_order_detail(self.reference, self.created)
+        self.assertNotIsInstance(caught.exception, OrderOutcomeUnknown)
+        self.assertNotIn("private", str(caught.exception))
+        opener.open.assert_called_once()
 
 
 if __name__ == "__main__":

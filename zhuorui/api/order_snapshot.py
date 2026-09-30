@@ -267,3 +267,36 @@ def order_snapshots(config: dict, response: dict, *, now: datetime | None = None
             raise OrderSnapshotError("Order snapshot exceeds 64 KiB.")
         snapshots.append(result)
     return snapshots
+
+
+def order_detail_snapshot(config: dict, response: dict, listed: dict, *, now: datetime) -> dict:
+    """Validate a fresh detail read before using its cumulative executions.
+
+    List/history responses omit ``bargainList``. The app's v2 detail endpoint
+    supplies the same order model with that execution breakdown. Require the
+    immutable identity to match the list read, while allowing fills, status and
+    order terms to advance between reads.
+    """
+    if (not isinstance(response, dict) or response.get("code") != "000000"
+            or not isinstance(response.get("data"), dict)):
+        raise OrderSnapshotError("Order detail response is missing an order record.")
+    snapshots = order_snapshots(config, {"code": "000000", "data": [response["data"]]}, now=now)
+    if len(snapshots) != 1:
+        raise OrderSnapshotError("Order detail does not identify today's requested order.")
+    detailed = snapshots[0]
+    for field in ("account_id", "account_num_id", "order_id", "created_at", "symbol", "side"):
+        if detailed[field] != listed[field]:
+            raise OrderSnapshotError("Order detail identity does not match its requested order.")
+    if detailed["filled_quantity"] < listed["filled_quantity"]:
+        raise OrderSnapshotError("Order detail has stale cumulative executions; the next refresh will retry.")
+    terminal = {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
+    if listed["status"] in terminal and detailed["status"] not in terminal:
+        raise OrderSnapshotError("Order detail has stale order status; the next refresh will retry.")
+    if detailed["filled_quantity"] > 0 and detailed["average_fill_price"] is None:
+        raise OrderSnapshotError("Order detail is missing complete execution prices; the next refresh will retry.")
+    # Some detail versions omit optional listing metadata. All required order
+    # fields above come from the detail response itself, never from placement.
+    for field in ("currency", "time_in_force"):
+        if field not in detailed and field in listed:
+            detailed[field] = listed[field]
+    return detailed

@@ -23,6 +23,8 @@ from .signing import canonical, signature
 QUOTE_PATH = "/as_market/api/stock_price/v1/get_prices"
 LOGIN_PATH = "/as_user/api/user_account/v1/user_login_pwd"
 TRADE_AUTH_PATH = "/as_trade/api/account/v1/auth"
+ORDER_DETAIL_PATH = "/as_trade/api/order/v2/entrust_detail"
+MAX_ORDER_TIMESTAMP_MS = 253402300799999  # 9999-12-31T23:59:59.999Z.
 
 
 def strict_object(pairs):
@@ -58,6 +60,8 @@ class ApiClient:
             urllib.request.HTTPSHandler(context=ssl.create_default_context()), NoRedirect())
 
     def query(self, name):
+        if name == "order-detail":
+            raise ApiError("Order detail requires a transaction reference and creation time; use query_order_detail.")
         if name not in READ_PATHS:
             raise ApiError("This runtime permits only named account queries.")
         if name == "order-history":
@@ -75,6 +79,17 @@ class ApiClient:
         except (OverflowError, OSError, ValueError):
             raise ApiError("Order history date cannot be represented as an Eastern day window.") from None
         return self._request(READ_PATHS["order-history"], {"startDate": start_ms, "endDate": end_ms})
+
+    def query_order_detail(self, reference, entrust_time):
+        """Read an order's current detail using its broker identity and creation time."""
+        if (not isinstance(reference, str) or not reference or len(reference) > 256
+                or any(c.isspace() or ord(c) < 32 or 0x7F <= ord(c) <= 0x9F
+                       or 0xD800 <= ord(c) <= 0xDFFF for c in reference)):
+            raise ApiError("Order detail requires a valid transaction reference.")
+        if type(entrust_time) is not int or not 0 < entrust_time <= MAX_ORDER_TIMESTAMP_MS:
+            raise ApiError("Order detail requires a positive supported Unix millisecond creation time.")
+        return self._request(ORDER_DETAIL_PATH,
+                             {"orderTxnReference": reference, "entrustTime": entrust_time})
 
     def submit_order(self, symbol, side, quantity, kind, *, price=None, allow_pre_post=None):
         plan = plan_order(symbol, side, quantity, kind, price=price, allow_pre_post=allow_pre_post)
@@ -189,7 +204,7 @@ class ApiClient:
     def _request(self, path, body, *, write=False, login=False, trade_auth=False):
         if sum((bool(write), bool(login), bool(trade_auth))) > 1:
             raise ApiError("Unsupported mixed broker operation.")
-        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH, ORDER_BOOK_PATH, MARKET_STATUS_PATH})
+        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH, ORDER_BOOK_PATH, MARKET_STATUS_PATH, ORDER_DETAIL_PATH})
         if path not in permitted:
             raise ApiError("Unsupported broker operation.")
         payload = {**body, "timeStamp": int(self.now() * 1000)}
