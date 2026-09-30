@@ -218,16 +218,16 @@ class ClientProvider:
         return True
 
 
-def status_event(settings, config, command, status, message, **extra):
-    event = {"server_id": settings.server_id, "account_id": config.get("account_id"),
-             "account_num_id": config.get("account_num_id"), "status": status,
-             "message": message, "timestamp": time.time(), "backend": "api"}
+def record_command_result(command, status, message, **extra):
+    """Keep command outcomes local; only broker order snapshots go to Kafka."""
+    fields = {"status": status, "command_id": extra.get("command_id")}
     if command is not None:
-        event["command_id"] = command.command_id
+        fields["command_id"] = command.command_id
         if hasattr(command, "symbol"):
-            event.update(symbol=command.symbol, side=command.side, order_type=command.order_type)
-    event.update(extra)
-    return event
+            fields.update(symbol=command.symbol, side=command.side, order_type=command.order_type)
+    # Detailed outcomes remain in the command journal. Do not log exception
+    # messages or raw response/payload fields passed by the executor.
+    log_event("api.commands", "Command result recorded locally.", **fields)
 
 
 def handle_record(record, config, settings, executor, emit):
@@ -311,25 +311,12 @@ def _run_listener(config_path):
             producer = KafkaProducer(bootstrap_servers=settings.bootstrap_servers, client_id=settings.client_id,
                 value_serializer=canonical, acks="all", retries=3, max_block_ms=10000,
                 request_timeout_ms=10000, bootstrap_timeout_ms=10000)
-            # Publish statuses for every command, including disabled/rejected
-            # commands, so a controller never mistakes a received command for a fill.
-            def emit(command, status, message, **extra):
-                event = status_event(settings, config, command, status, message, **extra)
-                delivered = False
-                try:
-                    producer.send(settings.order_status_topic, event,
-                                  key=str(event.get("command_id", settings.server_id)).encode()).get(timeout=10)
-                    delivered = True
-                except Exception as exc:
-                    state.update(last_error="Could not publish a command result to Kafka; inspect the local journal.")
-                    log_event("api.kafka", "Command result publication failed; inspect the journal.",
-                              level="ERROR", error=exc, status=status)
-                log_event("api.commands", "Command result recorded.", status=status, kafka_delivered=delivered)
             stage = "session_bootstrap"
             clients.bootstrap()
             publisher = HoldingsPublisher(config, settings, producer, clients, state)
             publisher.start()
-            executor = CommandExecutor(settings, api_settings, journal, clients, publisher, emit, config=config)
+            executor = CommandExecutor(settings, api_settings, journal, clients, publisher,
+                                       record_command_result, config=config)
             stage = "pending_cancellation_recovery"
             executor.recover_pending_cancellations()
             stage = "kafka_consumer_connect"
@@ -356,7 +343,7 @@ def _run_listener(config_path):
                         if settings.stop_file.exists():
                             break
                         stage = "command_processing"
-                        handle_record(record, config, settings, executor, emit)
+                        handle_record(record, config, settings, executor, record_command_result)
                         # Journal is committed before this offset. Redelivery is
                         # safe even if this commit fails or the process crashes.
                         stage = "kafka_commit"

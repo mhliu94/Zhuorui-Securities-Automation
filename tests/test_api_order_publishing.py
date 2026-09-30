@@ -28,7 +28,7 @@ class OrderPublishingTests(unittest.TestCase):
     def setUp(self):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.root = Path(folder.name)
+        self.root = Path(folder.name).resolve()
         self.config = {"account_id": "synthetic-account", "account_num_id": 7, "server_id": "test",
                        "kafka": {"bootstrap_servers": "unused.invalid:9092"},
                        "api": {"journal_file": str(self.root / "commands.sqlite3")}}
@@ -82,6 +82,18 @@ class OrderPublishingTests(unittest.TestCase):
         self.assertIsNone(self.state.values["last_error"])
         self.assertFalse(self.settings.order_snapshot_journal_file.exists())
         self.assertNotIn("last_orders_publish", self.state.values)
+
+    def test_broker_rejected_order_still_publishes_a_broker_snapshot(self):
+        self.current = []
+        self.history = [order("broker-rejected-order", status="9")]
+        self.publisher.publish("order_submission")
+        self.assertEqual(len(self.events()), 1)
+        event = self.events()[0].args[1]
+        self.assertEqual(event["schema_version"], 1)
+        self.assertEqual(event["status"], "REJECTED")
+        self.assertEqual(event["order_id"], "broker-rejected-order")
+        self.assertNotIn("command_id", event)
+        self.assertEqual(self.events()[0].kwargs["key"], b'["synthetic-account","broker-rejected-order"]')
 
     def test_history_includes_completed_orders_and_excludes_other_eastern_dates(self):
         self.current = []

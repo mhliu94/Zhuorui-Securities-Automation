@@ -261,6 +261,7 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.publisher.thread.is_alive.return_value = True
         self.clients = Mock()
         self.clients.recovery_needed = False
+        self.clients.recover.return_value = False
         self.client = self.clients.return_value
         self.client.headers = {"userid": "synthetic-user"}
         self.client.query.side_effect = lambda name: {"code": "000000", "data":
@@ -330,6 +331,8 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.assertEqual(self.consumer_kwargs["max_poll_records"], 1)
         self.assertEqual(self.at_commit, ["submitted"])
         self.client.submit_order.assert_called_once()
+        self.producer.send.assert_not_called()
+        self.publisher.request.assert_called_once_with("order_submission", delay_seconds=2)
         self.consumer.close.assert_called_once_with(autocommit=False, timeout_ms=10000)
         self.publisher.start.assert_called_once()
         self.publisher.close.assert_called_once()
@@ -338,6 +341,46 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         state = json.loads(self.settings.state_file.read_text())
         self.assertFalse(state["running"])
         self.assertFalse(state["kafka_connected"])
+
+    def test_stale_tal_quote_is_journaled_and_committed_without_kafka_order_status(self):
+        payload = json.loads(record().value)
+        payload.update(symbol="TAL", qty_shares=100)
+        self.consumer.poll.return_value = {"partition": [record(payload)]}
+        reason = "Real-time price query failed after two attempts: Real-time order book is stale or has a future timestamp."
+        self.client.prepare_market_order.side_effect = ApiError(reason)
+        with patch("zhuorui.api.listener.log_event") as log:
+            self.assertEqual(self.run_offline(), 0)
+        self.client.submit_order.assert_not_called()
+        self.producer.send.assert_not_called()
+        self.publisher.request.assert_not_called()
+        self.assertEqual(self.at_commit, ["rejected"])
+        with closing(sqlite3.connect(self.settings.journal_file)) as db:
+            saved = db.execute("SELECT state,message,reference FROM commands WHERE id='producer-id'").fetchone()
+        self.assertEqual(saved, ("rejected", reason, None))
+        self.assertTrue(any(call.kwargs.get("status") == "rejected"
+                            and call.kwargs.get("command_id") == "producer-id"
+                            and call.kwargs.get("symbol") == "TAL" for call in log.call_args_list))
+
+    def test_disabled_command_is_recorded_without_broker_write_or_kafka_order_status(self):
+        self.settings = replace(self.settings, live_orders_enabled=False)
+        self.assertEqual(self.run_offline(), 0)
+        self.assertEqual(self.at_commit, ["disabled"])
+        self.client.query.assert_not_called()
+        self.client.submit_order.assert_not_called()
+        self.producer.send.assert_not_called()
+
+    def test_invalid_or_stale_command_is_logged_and_committed_without_kafka_order_status(self):
+        for value in (record(raw=b'{"private":"secret",'), record(stamp=1000000)):
+            with self.subTest(value=value):
+                self.consumer.poll.return_value = {"partition": [value]}
+                self.consumer.commit.side_effect = lambda _: self.settings.stop_file.write_text("stop")
+                with patch("zhuorui.api.listener.log_event") as log:
+                    self.assertEqual(self.run_offline(), 0)
+                self.assertTrue(any(call.kwargs.get("status") == "rejected"
+                                    and call.kwargs.get("command_id") for call in log.call_args_list))
+                self.client.submit_order.assert_not_called()
+                self.producer.send.assert_not_called()
+        self.assertEqual(self.consumer.commit.call_count, 2)
 
     def test_commit_failure_leaves_submission_durable_and_still_cleans_up(self):
         self.consumer.commit.side_effect = RuntimeError("synthetic commit failure")

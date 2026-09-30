@@ -185,17 +185,22 @@ outage, can delay delivery. Shutdown drains accepted refreshes at their deadline
 Market, Limit and FOK orders each wait five seconds in the serial command
 consumer before checking the session, obtaining any sizing quote and submitting.
 For two queued orders, the intentional waits total five seconds for the first
-and ten seconds for the second; broker calls, status delivery and any FOK
+and ten seconds for the second; broker calls and any FOK
 cancellation handling add processing time. Waits do not overlap. Disabled,
 duplicate and blocked commands do not wait or submit. Cancellation commands
 have no new delay. The FOK cancellation deadline still starts at actual dispatch,
 after the five-second wait and preflight. Status snapshots and startup logs expose
 both timing values.
 
-API command results always publish to the configured `order-status` topic,
-including disabled, rejected, duplicate and unknown results. The legacy
-`kafka.publish_order_status` switch does not disable API results. Broker
-acknowledgement does not prove a fill or successful cancellation.
+The API reserves the configured `order-status` topic for broker order snapshots.
+Command results stay local: the command journal retains execution outcomes and
+reasons, and logs record result statuses and command IDs, including validation
+failures before journal entry. Locally rejected, disabled, duplicate, blocked,
+and no-action commands do not produce Kafka order statuses. Submission and
+cancellation acknowledgements or uncertain outcomes also stay local; the broker
+order reads below establish the published state. Broker acknowledgement does not
+prove a fill or successful cancellation. The legacy `kafka.publish_order_status`
+switch does not disable API broker snapshots.
 
 Every holdings query also triggers a read of today's orders on the same
 background publisher, for startup/periodic, submission, cancellation and
@@ -230,9 +235,10 @@ status (`last_orders_error`, `last_orders_query`, `last_orders_publish`,
 `last_orders_count`, `orders_publish_count`) and logs. They do not suppress an
 otherwise successful account snapshot or block command/FOK processing. The next
 refresh retries, and authentication failures use the existing login recovery.
-Order snapshots populate KTrader's new read-only Order UI. Existing command
-result events on this topic keep their original format; KTrader counts/skips
-those as invalid snapshots rather than inferring broker orders from them.
+Order snapshots populate KTrader's read-only Order UI, including rejections
+reported in the broker's order records. Local command results are not published
+as order snapshots. Older command-result messages may remain in Kafka retention;
+KTrader skips those rather than inferring broker orders from them.
 
 ## Kafka command contract
 
@@ -281,8 +287,8 @@ comes from the pinned `tzdata` dependency.
 This automatic routing applies to all Market commands regardless of the legacy
 pre/post flag. Explicit Limit flags retain their existing meaning. The journal
 keeps the original command for duplicate detection and a separate `execution`
-record with the actual type, limit, session, best level, timestamp and attempts;
-result events also include this record. Existing commands are never replayed.
+record with the actual type, limit, session, best level, timestamp and attempts.
+This execution audit remains local. Existing commands are never replayed.
 
 A Market command containing a price is rejected. Explicit Limit sends `LO`
 and rounds its price to cents before signing:
