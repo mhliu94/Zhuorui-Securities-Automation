@@ -4,6 +4,9 @@ zhuorui_config.json
 .env
 .env.*
 
+# Generated account reports and exports
+/outputs/
+
 # Python cache and virtual environments
 __pycache__/
 *.py[cod]
