@@ -165,16 +165,15 @@ take effect on restart. Dashboard controls preserve the configured mode.
 
 The shared `kafka` section supplies the control-server address and topics. Set
 `kafka.holdings_interval_seconds` to `30`; this is also the API default. Each
-submission attempt schedules a fresh holdings read two seconds after it completes
+submission attempt queues a fresh holdings read immediately after it completes
 on an independent worker. This does not delay the next order or FOK cancellation,
 or reset the 30-second periodic schedule. Cancellation attempts also trigger a
 refresh. Existing in-flight publications and broker or Kafka outages can delay
 delivery.
 
-Market, Limit and FOK commands each wait five seconds before submission, one
-command at a time. Two queued orders therefore accumulate five and ten seconds
-of intentional waiting, plus normal processing time. The FOK cancellation timer
-starts at dispatch, after this wait. Cancellation commands are not delayed.
+Market, Limit and FOK commands are processed one command at a time with no
+intentional delay before submission. The FOK cancellation timer starts at
+dispatch. Cancellation commands are not delayed.
 
 Every command needs a matching `account_id` or `account_num_id`. Provided server
 selectors must match too. `MARKET_ORDER` rejects price fields and uses native `MO`

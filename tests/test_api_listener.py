@@ -146,7 +146,7 @@ class ApiRecordReplayTests(unittest.TestCase):
         self.assertEqual(self.journal.get("producer-id")["state"], "unknown")
         self.assertEqual(self.journal.get("next-producer-id")["state"], "blocked")
         self.assertEqual(self.emit.call_args.args[1], "blocked")
-        self.holdings.request.assert_called_once_with("order_submission", delay_seconds=2)
+        self.holdings.request.assert_called_once_with("order_submission", delay_seconds=0)
 
     def test_same_id_with_changed_economics_is_rejected_without_resubmission(self):
         self.handle(record())
@@ -302,7 +302,7 @@ class ApiListenerLifecycleTests(unittest.TestCase):
                 self.producer_kwargs = producer_type.call_args.kwargs
                 self.consumer_kwargs = consumer_type.call_args.kwargs
 
-    def test_two_queued_kafka_orders_submit_after_separate_five_second_delays(self):
+    def test_two_queued_kafka_orders_submit_without_delay(self):
         second = json.loads(record().value)
         second["id"] = "second-order"
         self.consumer.poll.side_effect = [{"partition": [record()]},
@@ -318,8 +318,8 @@ class ApiListenerLifecycleTests(unittest.TestCase):
                 self.settings.stop_file.write_text("stop")
         self.consumer.commit.side_effect = committed
         self.assertEqual(self.run_offline(), 0)
-        self.assertEqual(submitted, [105, 110])
-        self.assertEqual(self.clock.sleeps, [5, 5])
+        self.assertEqual(submitted, [100, 100])
+        self.assertEqual(self.clock.sleeps, [])
         self.assertEqual(self.consumer.commit.call_count, 2)
 
     def test_installed_kafka_options_commit_after_durable_submission_and_clean_stop(self):
@@ -332,7 +332,7 @@ class ApiListenerLifecycleTests(unittest.TestCase):
         self.assertEqual(self.at_commit, ["submitted"])
         self.client.submit_order.assert_called_once()
         self.producer.send.assert_not_called()
-        self.publisher.request.assert_called_once_with("order_submission", delay_seconds=2)
+        self.publisher.request.assert_called_once_with("order_submission", delay_seconds=0)
         self.consumer.close.assert_called_once_with(autocommit=False, timeout_ms=10000)
         self.publisher.start.assert_called_once()
         self.publisher.close.assert_called_once()
