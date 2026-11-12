@@ -150,7 +150,7 @@ class HoldingsStateFailureTests(unittest.TestCase):
         self.producer = Mock()
         self.publisher = HoldingsPublisher({}, self.settings, self.producer, self.provider, self.state)
         self.enterContext(patch("zhuorui.api.snapshot.account_snapshot",
-                                return_value={"account_id": "synthetic-account"}))
+                                return_value={"account_id": "synthetic-account", "cash": 1, "ts": "2026-11-11T00:00:00Z", "trading_enabled": True, "positions": []}))
         self.enterContext(patch("builtins.print"))
 
     def test_publisher_thread_survives_repeated_status_write_failures(self):
@@ -172,7 +172,7 @@ class HoldingsStateFailureTests(unittest.TestCase):
                 self.assertEqual(self.publisher.published, 3)
                 self.assertEqual(self.state.values["holdings_publish_count"], 3)
                 self.assertIsNone(self.state.values["last_error"])
-                self.assertEqual(self.producer.send.call_count, 3)
+                self.assertEqual(self.producer.send.call_count, 1)
             finally:
                 self.publisher.close()
         self.assertTrue(self.state.update(running=False))

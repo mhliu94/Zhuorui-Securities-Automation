@@ -24,7 +24,7 @@ class PublicationLoggingTests(unittest.TestCase):
         self.publisher = HoldingsPublisher({}, SimpleNamespace(live_orders_enabled=True, holdings_topic="test"),
                                            self.producer, lambda: self.client, self.state)
         self.enterContext(patch("zhuorui.api.snapshot.account_snapshot", return_value={
-            "account_id": "private-account", "positions": [{"symbol": "private-position"}]}))
+            "account_id": "private-account", "cash": 1, "ts": "2026-11-11T00:00:00Z", "trading_enabled": True, "positions": [{"symbol": "private-position", "qty": 1}]}))
 
     def test_broker_failure_stage_is_logged_without_exception_message_then_recovers(self):
         self.client.query.side_effect = ApiError("private-broker-response")

@@ -48,7 +48,7 @@ class OrderPublishingTests(unittest.TestCase):
         self.publisher = self.make_publisher()
         self.addCleanup(self.publisher.close)
         self.enterContext(patch("zhuorui.api.snapshot.account_snapshot",
-                                return_value={"account_id": "synthetic-account", "account_num_id": 7}))
+                                return_value={"account_id": "synthetic-account", "account_num_id": 7, "cash": 1, "ts": "2026-11-11T00:00:00Z", "trading_enabled": True, "positions": []}))
         self.enterContext(patch("builtins.print"))
 
     def make_publisher(self, provider=None):

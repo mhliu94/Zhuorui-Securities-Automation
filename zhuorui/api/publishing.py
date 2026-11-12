@@ -91,6 +91,11 @@ class HoldingsPublisher:
         self.orders_published = 0
         self.order_failures = 0
         self.order_journal = None
+        from .account_delta import AccountDeltaPublisher, OrderChanges
+        self._account_deltas = AccountDeltaPublisher()
+        self._order_changes = OrderChanges()
+        self._refresh_until = 0.0
+        self._orders_in_scheduler = False
 
     def start(self):
         self.thread.start()
@@ -122,10 +127,14 @@ class HoldingsPublisher:
             elapsed = self.now() - start
             log_event("api.publisher", f"Holdings query completed in {elapsed:.3f} seconds.")
             stage = "kafka_send"
-            future = self.producer.send(self.settings.holdings_topic, snapshot,
-                                        key=snapshot["account_id"].encode("utf8"))
-            stage = "kafka_ack"
-            future.get(timeout=10)
+            def deliver(event):
+                nonlocal stage
+                stage = "kafka_send"
+                future = self.producer.send(self.settings.holdings_topic, event,
+                    key=snapshot["account_id"].encode("utf8"))
+                stage = "kafka_ack"
+                return future.get(timeout=10)
+            self._account_deltas.publish(snapshot, deliver)
             self.published += 1
             stage = "record_success"
             values = dict(last_holdings_publish=utc_now(), holdings_publish_count=self.published,
@@ -151,7 +160,7 @@ class HoldingsPublisher:
                     message = self.client_provider.recovery_message() or message
             self.state.update(last_holdings_error=message, last_error=message, last_holdings_attempt=utc_now())
         finally:
-            if holdings_attempted:
+            if holdings_attempted and not self._orders_in_scheduler:
                 self.publish_orders(reason)
 
     def publish_orders(self, reason):
@@ -206,6 +215,9 @@ class HoldingsPublisher:
                 raise ApiError("Eastern date changed during order reads; the next refresh will retry.")
             for snapshot in snapshots:
                 snapshot["updated_at"] = observed_at.isoformat()
+            if self._order_changes.observe(snapshots):
+                self._refresh_until = self.now() + 10
+                self.request('order_change')
             stage = "order_journal"
             path = getattr(self.settings, "order_snapshot_journal_file", None)
             if self.order_journal is None and (snapshots or path is not None and Path(path).exists()):
@@ -266,33 +278,39 @@ class HoldingsPublisher:
             log_event("api.publisher", "Publisher worker exited unexpectedly.", level="ERROR", error=exc)
 
     def _run(self):
-        due = self.now()
+        self._orders_in_scheduler = True
+        due = order_due = delta_due = self.now()
         pending, sequence, stopping = [], 0, False
         while True:
             current = self.now()
-            # Periodic publications retain their independent cadence even when
-            # a delayed request is pending or immediate requests keep arriving.
+            if not stopping and order_due <= current:
+                started = self.now()
+                self.publish_orders('order_poll')
+                order_due = max(started + 1.0, self.now() + .01)
+            current = self.now()
             if not stopping and due <= current:
-                self.publish("periodic")
-                due += self.settings.holdings_interval_seconds
-                if due <= self.now():
-                    due = self.now() + self.settings.holdings_interval_seconds
-                continue
-            if pending and pending[0][0] <= current:
+                self.publish('periodic')
+                due = self.now() + min(30, self.settings.holdings_interval_seconds)
+                delta_due = self.now() + 1
+            elif not stopping and current < self._refresh_until and delta_due <= current:
+                self.publish('fill_settlement')
+                delta_due = self.now() + 1
+            if pending and pending[0][0] <= self.now():
                 _, _, reason = heapq.heappop(pending)
                 self.publish(reason)
+                delta_due = self.now() + 1
                 continue
             if stopping and not pending:
-                log_event("api.publisher", "Publisher stopped after draining its queue.", published=self.published)
                 return
-            wake_at = min(due if not stopping else float("inf"),
-                          pending[0][0] if pending else float("inf"))
+            wake_at = min(due if not stopping else float('inf'),
+                          order_due if not stopping else float('inf'),
+                          delta_due if not stopping and self.now() < self._refresh_until else float('inf'),
+                          pending[0][0] if pending else float('inf'))
             try:
                 request = self.requests.get(timeout=max(0, wake_at - self.now()))
             except queue.Empty:
                 continue
             if request is None:
-                # Drain accepted requests at their scheduled times on shutdown.
                 stopping = True
             else:
                 ready_at, reason = request
@@ -308,3 +326,8 @@ class HoldingsPublisher:
         if self.order_journal is not None:
             self.order_journal.close()
             self.order_journal = None
+        from .account_delta import AccountDeltaPublisher, OrderChanges
+        self._account_deltas = AccountDeltaPublisher()
+        self._order_changes = OrderChanges()
+        self._refresh_until = 0.0
+        self._orders_in_scheduler = False

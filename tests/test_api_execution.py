@@ -363,6 +363,7 @@ class ExecutionTests(unittest.TestCase):
                     raise AssertionError("Test did not release holdings worker")
 
         publisher.publish = blocked_publication
+        publisher.publish_orders = lambda reason: None
         publisher.start()
         try:
             self.assertTrue(entered.wait(timeout=1))
@@ -407,6 +408,7 @@ class PublishingScheduleTests(unittest.TestCase):
         def publish(reason):
             publications.append((reason, clock.now()))
         publisher.publish = publish
+        publisher.publish_orders = lambda reason: None
         actions = []
         for arrival, reason, delay in events:
             action = (lambda: publisher.requests.put(None)) if reason is None else (
@@ -443,6 +445,7 @@ class PublishingScheduleTests(unittest.TestCase):
                                       None, None, None, now=clock.now)
         publications = []
         publisher.publish = lambda reason: publications.append((reason, clock.now()))
+        publisher.publish_orders = lambda reason: None
         publisher.request("order_submission")
         clock.value = 110  # Worker was occupied past the request's deadline.
         publisher.requests.put(None)
