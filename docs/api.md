@@ -182,15 +182,11 @@ publications retain their 30-second cadence, and cancellation and login-recovery
 refreshes remain immediate. A publication already in flight, or a broker/Kafka
 outage, can delay delivery. Shutdown drains accepted refreshes at their deadlines.
 
-Market, Limit and FOK orders each wait five seconds in the serial command
-consumer before checking the session, obtaining any sizing quote and submitting.
-For two queued orders, the intentional waits total five seconds for the first
-and ten seconds for the second; broker calls and any FOK
-cancellation handling add processing time. Waits do not overlap. Disabled,
-duplicate and blocked commands do not wait or submit. Cancellation commands
-have no new delay. The FOK cancellation deadline still starts at actual dispatch,
-after the five-second wait and preflight. Status snapshots and startup logs expose
-both timing values.
+Market, Limit and FOK orders have zero pre-action delay by default. Session
+checks, sizing quotes and submission remain serialized. Broker calls and FOK
+cancellation handling still take time. Disabled, duplicate and blocked commands
+do not submit. The FOK cancellation deadline starts at actual dispatch after
+preflight. Status snapshots and startup logs expose the timing values.
 
 The API reserves the configured `order-status` topic for broker order snapshots.
 Command results stay local: the command journal retains execution outcomes and
@@ -263,8 +259,7 @@ Examples of accepted shapes; replace IDs and order fields before use:
 {"id":"example-cancel","account_num_id":1,"type":"CANCEL_ORDER","orderTxnReference":"EXAMPLE_BROKER_REFERENCE"}
 ```
 
-Market commands query Zhuorui's US equities market status after the five-second
-wait and account preflight. Regular-session orders send native `entrustProp: MO`
+Market commands query Zhuorui's US equities market status after account preflight. Regular-session orders send native `entrustProp: MO`
 without a price or pre/post flag. Premarket and postmarket commands become
 DAY limit orders (`LO`, `allowPrePost: "Y"`; DAY is the captured broker default):
 
