@@ -202,7 +202,10 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
     """
     if not command_targets_configured_account(payload, config, server_id=server_id):
         return None
-    command_id = _alias(payload, ID_KEYS, lambda v: _text(v, "Command ID"))
+    is_exact_cancel = any(_normalize(str(value)) == "cancel_order"
+                          for _, value in _present(payload, TYPE_KEYS + ACTION_KEYS))
+    id_keys = ("id", "command_id", "commandId") if is_exact_cancel else ID_KEYS
+    command_id = _alias(payload, id_keys, lambda v: _text(v, "Command ID"))
     if command_id is None:
         if message_id is None:
             raise CommandError("Command requires an ID or its stable Kafka message identity.")
@@ -214,9 +217,13 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
     if cancellations:
         if any(value in ORDER_TYPES for value in type_values):
             raise CommandError("Command cannot request both submission and cancellation.")
-        reference = _alias(payload, ("orderTxnReference", "order_txn_reference", "order_reference",
-                                    "orderReference", "reference"),
+        reference_keys = ("orderTxnReference", "order_txn_reference", "order_reference", "orderReference", "reference")
+        if is_exact_cancel:
+            reference_keys += ("order_id", "orderId")
+        reference = _alias(payload, reference_keys,
                            lambda v: _text(v, "Order transaction reference"))
+        if "cancel_order" in cancellations and reference is None:
+            raise CommandError("CANCEL_ORDER requires an exact broker order reference.")
         explicit_all = any("all" in value.split("_") for value in cancellations)
         if reference and explicit_all:
             raise CommandError("Cancel-all commands cannot include one order reference.")

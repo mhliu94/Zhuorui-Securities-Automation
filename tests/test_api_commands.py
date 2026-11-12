@@ -19,6 +19,13 @@ def order(**updates):
 
 
 class ApiCommandTests(unittest.TestCase):
+    def test_exact_cancel_separates_command_id_from_broker_id(self):
+        command = parse_command({"type": "CANCEL_ORDER", "account_id": "ACC-ZHUORUI",
+            "command_id": "cancel-1", "order_id": "broker-99", "order_reference": "broker-99"}, CONFIG)
+        self.assertEqual(command, CancelCommand("cancel-1", "broker-99", False))
+        with self.assertRaises(CommandError):
+            parse_command({"type": "CANCEL_ORDER", "account_id": "ACC-ZHUORUI", "command_id": "cancel-1"}, CONFIG)
+
     def test_current_ktrader_market_contract(self):
         result = parse_command(order(), CONFIG)
         self.assertEqual(result, TradingCommand("producer-123", "BILI", "buy", 1,
@@ -138,8 +145,8 @@ class ApiCommandTests(unittest.TestCase):
                 self.assertEqual(parse_command(payload, CONFIG), CancelCommand("cancel-1", "broker-ref", False))
         command = parse_command({"id": "cancel-all", "account_num_id": 7, "action": "CANCEL_ALL_ORDERS"}, CONFIG)
         self.assertEqual(command, CancelCommand("cancel-all", None, True))
-        generic = parse_command({"id": "cancel", "account_num_id": 7, "type": "CANCEL_ORDER"}, CONFIG)
-        self.assertTrue(generic.cancel_all)
+        with self.assertRaises(CommandError):
+            parse_command({"id": "cancel", "account_num_id": 7, "type": "CANCEL_ORDER"}, CONFIG)
 
     def test_cancel_id_is_never_guessed_to_be_broker_reference(self):
         command = parse_command({"order_id": "producer-id", "account_num_id": 7, "type": "CANCEL"}, CONFIG)
