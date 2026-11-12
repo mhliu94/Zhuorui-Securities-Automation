@@ -27,6 +27,25 @@ def utc_ms(year, month, day, hour=0):
 
 
 class OrderDateReadTests(unittest.TestCase):
+    def test_exact_cancel_resolves_prior_day_history_without_widening_scope(self):
+        with TemporaryDirectory() as folder:
+            client = Mock()
+            client.query.return_value = {"code": "000000", "data": []}
+            client.query_orders_for_date.return_value = {"code": "000000", "data": [
+                {"ts": "US", "orderTxnReference": "old-manual", "entrustStatus": "NEW"},
+                {"ts": "US", "orderTxnReference": "other-algo", "entrustStatus": "NEW"}]}
+            journal = CommandJournal(Path(folder) / "journal.sqlite3", {"account": "synthetic"})
+            try:
+                journal.claim("cancel-old", {"synthetic": True})
+                executor = CommandExecutor(SimpleNamespace(live_orders_enabled=True),
+                    SimpleNamespace(cancel_after_seconds=1), journal, lambda: client, Mock(), Mock())
+                executor.cancel_command(client, CancelCommand("cancel-old", "old-manual", False, "2026-09-29T02:00:00Z"))
+                client.query_orders_for_date.assert_called_once_with(date(2026, 9, 28))
+                client.cancel_order.assert_called_once_with("old-manual")
+                self.assertEqual(journal.get("cancel-old")["state"], "cancel_requested")
+            finally:
+                journal.close()
+
     def client(self, response=None, *, now=utc_ms(2026, 9, 30, 2) / 1000):
         response = response if response is not None else {"code": "000000", "data": []}
         opener = FakeOpener(response)

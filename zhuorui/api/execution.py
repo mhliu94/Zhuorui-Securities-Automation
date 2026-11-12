@@ -1,5 +1,7 @@
 """Command execution and one-second cancellation, independent of Kafka/Android."""
 from dataclasses import asdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_FLOOR
 import time
 
@@ -175,7 +177,15 @@ class CommandExecutor:
                   cancellation_deadline_missed=deadline_missed, native_fok=False)
 
     def cancel_command(self, client, command):
-        references = cancel_references(client.query("orders"), command)
+        response = client.query("orders")
+        if not command.cancel_all and command.order_created_at:
+            # Older GTC orders may disappear from the today's-orders endpoint. Resolve the
+            # exact broker ID in its creation-day history; never widen into cancel-all.
+            rows = order_rows(response)
+            if not any(row.get("orderTxnReference") == command.order_reference for row in rows):
+                day = datetime.fromisoformat(command.order_created_at.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York")).date()
+                response = client.query_orders_for_date(day)
+        references = cancel_references(response, command)
         if not references:
             self.journal.update(command.command_id, "no_action", message="No cancellable orders matched.")
             self.emit(command, "no_action", "No cancellable US orders matched the command.")

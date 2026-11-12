@@ -41,6 +41,7 @@ class CancelCommand:
     command_id: str
     order_reference: str | None = None
     cancel_all: bool = False
+    order_created_at: str | None = None
 
 
 ORDER_TYPES = {
@@ -227,7 +228,15 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
         explicit_all = any("all" in value.split("_") for value in cancellations)
         if reference and explicit_all:
             raise CommandError("Cancel-all commands cannot include one order reference.")
-        return CancelCommand(command_id, reference, reference is None)
+        created = payload.get("order_created_at")
+        if created is not None:
+            try:
+                timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if timestamp.tzinfo is None or not reference:
+                    raise ValueError()
+            except (AttributeError, TypeError, ValueError):
+                raise CommandError("Exact cancellation creation time must include its timezone.") from None
+        return CancelCommand(command_id, reference, reference is None, created)
 
     actions = [_normalize(_text(value, "Command action"))
                for _, value in _present(payload, ACTION_KEYS)]
@@ -322,6 +331,8 @@ def command_fingerprint(command: TradingCommand | CancelCommand) -> str:
     """Stable semantic payload digest for detecting reuse of an ID for a new order."""
     values = asdict(command)
     values.pop("command_id")
+    if isinstance(command, CancelCommand) and values.get("order_created_at") is None:
+        values.pop("order_created_at", None)  # preserve fingerprints of pre-upgrade journal entries
     for key, value in values.items():
         if isinstance(value, Decimal):
             parts = value.as_tuple()
