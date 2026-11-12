@@ -1,4 +1,5 @@
 """Kafka command listener and recurring account publications over HTTP APIs."""
+from .kafka_security import connection_settings
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -308,7 +309,7 @@ def _run_listener(config_path):
             clients = ClientProvider(config_path, config, api_settings, settings, state)
             stage = "kafka_producer_connect"
             log_event("api.kafka", "Connecting Kafka producer.")
-            producer = KafkaProducer(bootstrap_servers=settings.bootstrap_servers, client_id=settings.client_id,
+            producer = KafkaProducer(bootstrap_servers=settings.bootstrap_servers, **connection_settings("kafka-python"), client_id=settings.client_id,
                 value_serializer=canonical, acks="all", retries=3, max_block_ms=10000,
                 request_timeout_ms=10000, bootstrap_timeout_ms=10000)
             stage = "session_bootstrap"
@@ -321,7 +322,7 @@ def _run_listener(config_path):
             executor.recover_pending_cancellations()
             stage = "kafka_consumer_connect"
             log_event("api.kafka", "Connecting Kafka command consumer.")
-            consumer = KafkaConsumer(settings.command_topic, bootstrap_servers=settings.bootstrap_servers,
+            consumer = KafkaConsumer(settings.command_topic, bootstrap_servers=settings.bootstrap_servers, **connection_settings("kafka-python"),
                 client_id=settings.client_id, group_id=settings.group_id, auto_offset_reset="latest",
                 enable_auto_commit=False, max_poll_records=1, max_poll_interval_ms=300000,
                 request_timeout_ms=40000, session_timeout_ms=30000, bootstrap_timeout_ms=10000)
