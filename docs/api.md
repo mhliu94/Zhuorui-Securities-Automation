@@ -293,9 +293,9 @@ record with the actual type, limit, session, best level, timestamp and attempts.
 This execution audit remains local. Existing commands are never replayed.
 
 A Market command containing a price is rejected. Explicit Limit sends `LO`
-and rounds its price to cents before signing:
+and rounds its price to $0.0001 ticks below $1 or $0.01 ticks at/above $1 before signing:
 Buy rounds up and Sell rounds down (for example, `322.1064` becomes `322.11` for
-Buy or `322.10` for Sell). Exact-cent prices retain their value. A Sell price that
+Buy or `322.10` for Sell). Valid prices such as `0.0911` retain their value. A Sell price that
 rounds to zero is rejected locally. This also applies to timed-cancel Limit orders.
 The journal keeps the original requested price for command identity and auditing.
 

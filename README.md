@@ -131,7 +131,8 @@ Inspect order formats offline:
 ```
 
 These are synthetic plans and send nothing. Market uses native `MO` without a
-limit price. Limit prices round to cents: Buy rounds up and Sell rounds down.
+limit price. Limit prices use $0.0001 ticks below $1 and $0.01 ticks at or above
+$1: Buy rounds up and Sell rounds down. Valid prices such as $0.0911 are preserved.
 Limit orders default to regular plus pre/post trading (`allowPrePost: "Y"`);
 `--no-allow-pre-post` selects regular hours only for an offline plan, and Kafka
 commands can select it with `allow_pre_post: false`. Native Market orders retain
@@ -178,7 +179,7 @@ dispatch. Cancellation commands are not delayed.
 Every command needs a matching `account_id` or `account_num_id`. Provided server
 selectors must match too. `MARKET_ORDER` rejects price fields and uses native `MO`
 during regular hours. In premarket and after-hours it becomes a DAY `LO` using
-Zhuorui's fresh order book: best ask +1% for buys (round up to cents), best bid
+Zhuorui's fresh order book: best ask +1% for buys (round up to the price tick), best bid
 -1% for sells (round down). A failed or unusable price read is retried once;
 orders are never resubmitted automatically. Closed or unknown sessions reject.
 `LIMIT_ORDER` and `LIMIT_ORDER_FOK` require `qty_shares` and `limit_price`; FOK uses

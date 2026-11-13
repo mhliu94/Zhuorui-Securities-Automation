@@ -6,6 +6,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from .errors import ApiError
+from .orders import price_tick
 
 ORDER_BOOK_PATH = "/as_market/api/order/v1/latest"
 MARKET_STATUS_PATH = "/as_market/api/market_trade_status/v2/get_market_status"
@@ -126,10 +127,10 @@ def market_limit_price(quote, side):
     with localcontext() as context:
         parts = price.as_tuple()
         context.prec = max(28, len(parts.digits) + max(parts.exponent, 0) + 6)
-        value = (price * Decimal("1.01" if side == "buy" else "0.99")).quantize(
-            Decimal("0.01"), rounding=ROUND_CEILING if side == "buy" else ROUND_FLOOR)
+        value = price * Decimal("1.01" if side == "buy" else "0.99")
+        value = value.quantize(price_tick(value), rounding=ROUND_CEILING if side == "buy" else ROUND_FLOOR)
     if value <= 0:
-        raise ApiError("Synthetic sell limit rounds down to zero cents.")
+        raise ApiError("Synthetic sell limit rounds below the minimum tick.")
     return value
 
 

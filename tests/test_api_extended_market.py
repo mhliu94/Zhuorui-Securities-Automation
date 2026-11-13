@@ -293,16 +293,19 @@ class ExtendedMarketTests(unittest.TestCase):
 
 
 class MarketDataPolicyTests(unittest.TestCase):
-    def test_directed_cent_rounding_uses_exact_decimal_even_with_low_context(self):
+    def test_directed_tick_rounding_uses_exact_decimal_even_with_low_context(self):
         for side, value, expected in (
             ("buy", "10.001", "10.11"), ("sell", "10.001", "9.90"),
             ("buy", "100", "101.00"), ("sell", "100", "99.00"),
-            ("buy", "0.009", "0.01"), ("buy", "999999999999999999999.99", "1009999999999999999999.99")):
+            ("buy", "0.009", "0.0091"), ("sell", "0.009", "0.0089"),
+            ("buy", "0.0911", "0.0921"), ("sell", "0.0910", "0.0900"),
+            ("buy", "0.9999", "1.01"), ("sell", "1.00", "0.9900"),
+            ("buy", "999999999999999999999.99", "1009999999999999999999.99")):
             with self.subTest(side=side, value=value), localcontext() as context:
                 context.prec = 6
                 self.assertEqual(market_limit_price(BestQuote(Decimal(value), Decimal(1), 0, ""), side), Decimal(expected))
         with self.assertRaises(ApiError):
-            market_limit_price(BestQuote(Decimal("0.009"), Decimal(1), 0, ""), "sell")
+            market_limit_price(BestQuote(Decimal("0.00009"), Decimal(1), 0, ""), "sell")
 
     def test_notional_floor_does_not_round_up_near_whole_share(self):
         self.assertEqual(quantity_at_limit(Decimal("299.999999999999999999999999999"), Decimal("100")), 2)

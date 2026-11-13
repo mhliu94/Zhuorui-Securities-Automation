@@ -1,4 +1,4 @@
-"""Offline regressions for cent pricing and the captured session instruction."""
+"""Offline regressions for equity price bands and the captured session instruction."""
 import base64
 import json
 from decimal import Decimal, localcontext
@@ -24,7 +24,11 @@ class OrderPolicyTests(unittest.TestCase):
         cases = (("322.1064", "322.11", "322.10"),
                  ("322.1000", "322.10", "322.10"),
                  ("9.9999", "10.00", "9.99"),
-                 ("0.019", "0.02", "0.01"),
+                 ("0.019", "0.0190", "0.0190"),
+                 ("0.0911", "0.0911", "0.0911"),
+                 ("0.09105", "0.0911", "0.0910"),
+                 ("0.99999", "1.0000", "0.9999"),
+                 ("1.0001", "1.01", "1.00"),
                  ("1e2", "100.00", "100.00"))
         for kind in ("limit", "timed-cancel"):
             for original, buy, sell in cases:
@@ -45,15 +49,30 @@ class OrderPolicyTests(unittest.TestCase):
         self.assertEqual(str(buy["entrustPrice"]), "123456789012345678901234567890.02")
         self.assertEqual(str(sell["entrustPrice"]), "123456789012345678901234567890.01")
 
-    def test_zero_cent_sell_and_unbounded_values_fail_before_transport(self):
+    def test_subtick_sell_and_unbounded_values_fail_before_transport(self):
         opener = FakeOpener()
         client = ApiClient(session(), SETTINGS, opener=opener)
-        for price in ("0.0099", "1e-100", "1e101", "1e-101", "9" * 129):
+        for price in ("0.00001", "1e-100", "1e101", "1e-101", "9" * 129):
             with self.subTest(price=price), self.assertRaises(ApiError):
                 client.submit_order("AAPL", "sell", 2, "limit", price=price)
         self.assertEqual(opener.calls, [])
         body = plan_order("AAPL", "buy", 2, "limit", price="0.0001")["unsigned_body"]
-        self.assertEqual(str(body["entrustPrice"]), "0.01")
+        self.assertEqual(str(body["entrustPrice"]), "0.0001")
+
+    def test_subdollar_kafka_price_survives_signed_submission(self):
+        for kind in ("LIMIT_ORDER", "LIMIT_ORDER_FOK"):
+            for side in ("buy", "sell"):
+                with self.subTest(kind=kind, side=side):
+                    command = parse_command(decode_command(json.dumps({"id": "tick-test", "account_num_id": 7,
+                        "type": kind, "symbol": "BDMD", "side": side, "qty_shares": 100, "limit_price": 0.0911})), CONFIG)
+                    opener = FakeOpener(); client = ApiClient(session(), SETTINGS, opener=opener, now=lambda: 2000)
+                    client.submit_order(command.symbol, command.side, command.quantity,
+                        "timed-cancel" if command.order_type == "fok" else command.order_type,
+                        price=command.limit_price, allow_pre_post=command.allow_pre_post)
+                    body = json.loads(opener.calls[0][0].data, parse_float=Decimal)
+                    self.assertEqual(body["entrustPrice"], Decimal("0.0911"))
+                    signature = body.pop("sign")
+                    KEY.public_key().verify(base64.b64decode(signature), canonical(body), padding.PKCS1v15(), hashes.SHA1())
 
     def test_kafka_to_signed_request_uses_rounded_price_and_session_policy(self):
         for kind in ("LIMIT_ORDER", "LIMIT_ORDER_FOK"):

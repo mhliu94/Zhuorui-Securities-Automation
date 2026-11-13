@@ -8,6 +8,11 @@ import re
 from .errors import ApiError
 
 
+def price_tick(value):
+    """USD equity increment for the proposed order price."""
+    return Decimal("0.0001") if value < 1 else Decimal("0.01")
+
+
 def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=None, cancel_after=1):
     if not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z0-9.=\-]{1,16}", symbol):
         raise ApiError("Invalid US stock symbol.")
@@ -37,14 +42,14 @@ def plan_order(symbol, side, quantity, kind, *, price=None, allow_pre_post=None,
         parts = value.as_tuple()
         if len(parts.digits) > 128 or abs(parts.exponent) > 100:
             raise ApiError("Price exceeds supported numeric precision.")
-        # Apply the user's cent policy before signing the exact outgoing body.
+        # Apply the price band before signing the exact outgoing body.
         # Use enough precision so the ambient Decimal context cannot alter it.
         with localcontext() as context:
             context.prec = max(28, len(parts.digits) + max(parts.exponent, 0) + 3)
-            value = value.quantize(Decimal("0.01"),
+            value = value.quantize(price_tick(value),
                                    rounding=ROUND_CEILING if side == "buy" else ROUND_FLOOR)
         if value <= 0:
-            raise ApiError("Sell limit price rounds down to zero cents; no order can be sent.")
+            raise ApiError("Sell limit price rounds below the minimum tick; no order can be sent.")
         # This is the app's captured regular + pre/post limit instruction.
         # sessionType is a response field, not a captured submission parameter.
         payload.update(entrustPrice=value, allowPrePost="Y" if allow_pre_post else "N")
