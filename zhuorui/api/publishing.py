@@ -215,6 +215,23 @@ class HoldingsPublisher:
                 raise ApiError("Eastern date changed during order reads; the next refresh will retry.")
             for snapshot in snapshots:
                 snapshot["updated_at"] = observed_at.isoformat()
+            # Join acknowledgements by the exact reference saved when this command
+            # was submitted. A cancel can share its target's reference.
+            journal = getattr(self.settings, "journal_file", None)
+            if snapshots and journal and Path(journal).is_file():
+                import sqlite3
+                from contextlib import closing
+                with closing(sqlite3.connect(Path(journal).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+                    expected = db.execute("SELECT value FROM metadata WHERE key='binding'").fetchone()
+                    if not expected or json.loads(expected[0]) != binding(self.config):
+                        raise ApiError("Command journal belongs to another account.")
+                    for snapshot in snapshots:
+                        matches = db.execute("SELECT id FROM commands WHERE reference=? "
+                            "AND json_extract(payload,'$.order_type') IN ('market','limit','fok') "
+                            "AND upper(json_extract(payload,'$.symbol'))=? "
+                            "AND upper(json_extract(payload,'$.side'))=?", (snapshot["order_id"], snapshot["symbol"], snapshot["side"])).fetchall()
+                        if len(matches) == 1:
+                            snapshot["command_id"] = matches[0][0]
             if self._order_changes.observe(snapshots):
                 self._refresh_until = self.now() + 10
                 self.request('order_change')

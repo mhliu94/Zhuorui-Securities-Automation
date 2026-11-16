@@ -58,6 +58,21 @@ class OrderPublishingTests(unittest.TestCase):
     def events(self):
         return [call for call in self.producer.send.call_args_list if call.args[0] == "order-status"]
 
+    def test_published_reference_traces_to_submission_not_its_cancellation(self):
+        from zhuorui.api.journal import CommandJournal
+        from zhuorui.api.session import binding
+        journal = CommandJournal(self.settings.journal_file, binding(self.config))
+        row = self.current[0]
+        side = {"1":"buy","2":"sell"}[row["entrustBs"]]
+        journal.claim("origin", {"order_type":"limit","symbol":row["code"],"side":side})
+        journal.update("origin","submitted",reference=row["orderTxnReference"])
+        journal.claim("cancel-it", {"order_reference":row["orderTxnReference"],"cancel_all":False})
+        journal.update("cancel-it","finished",reference=row["orderTxnReference"])
+        journal.close()
+        self.publisher.publish("periodic")
+        match = next(call.args[1] for call in self.events() if call.args[1]["order_id"]==row["orderTxnReference"])
+        self.assertEqual(match["command_id"],"origin")
+
     def test_every_refresh_queries_and_publishes_full_order_state(self):
         for reason in ("periodic", "order_submission", "order_cancellation", "login_recovery"):
             self.publisher.publish(reason)
