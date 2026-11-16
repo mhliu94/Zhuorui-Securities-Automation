@@ -23,6 +23,7 @@ from .signing import canonical, signature
 QUOTE_PATH = "/as_market/api/stock_price/v1/get_prices"
 LOGIN_PATH = "/as_user/api/user_account/v1/user_login_pwd"
 TRADE_AUTH_PATH = "/as_trade/api/account/v1/auth"
+ORDER_FEE_PATH = "/as_trade/api/order/v1/get_fee_detail"
 ORDER_DETAIL_PATH = "/as_trade/api/order/v2/entrust_detail"
 MAX_ORDER_TIMESTAMP_MS = 253402300799999  # 9999-12-31T23:59:59.999Z.
 
@@ -90,6 +91,14 @@ class ApiClient:
             raise ApiError("Order detail requires a positive supported Unix millisecond creation time.")
         return self._request(ORDER_DETAIL_PATH,
                              {"orderTxnReference": reference, "entrustTime": entrust_time})
+
+    def query_order_fees(self, reference, entrust_time):
+        """Read broker-reported fees for an exact order reference."""
+        if not isinstance(reference, str) or not reference.strip() or len(reference) > 256:
+            raise ApiError("A broker order reference is required.")
+        if type(entrust_time) is not int or not 0 < entrust_time <= MAX_ORDER_TIMESTAMP_MS:
+            raise ApiError("An order creation time is required.")
+        return self._request(ORDER_FEE_PATH, {"orderId": reference})
 
     def submit_order(self, symbol, side, quantity, kind, *, price=None, allow_pre_post=None):
         plan = plan_order(symbol, side, quantity, kind, price=price, allow_pre_post=allow_pre_post)
@@ -204,7 +213,7 @@ class ApiClient:
     def _request(self, path, body, *, write=False, login=False, trade_auth=False):
         if sum((bool(write), bool(login), bool(trade_auth))) > 1:
             raise ApiError("Unsupported mixed broker operation.")
-        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH, ORDER_BOOK_PATH, MARKET_STATUS_PATH, ORDER_DETAIL_PATH})
+        permitted = {TRADE_AUTH_PATH} if trade_auth else {LOGIN_PATH} if login else ({"/as_trade/api/order/v1/entrust_enter", "/as_trade/api/order/v1/entrust_withdraw"} if write else set(READ_PATHS.values()) | {QUOTE_PATH, ORDER_BOOK_PATH, MARKET_STATUS_PATH, ORDER_DETAIL_PATH, ORDER_FEE_PATH})
         if path not in permitted:
             raise ApiError("Unsupported broker operation.")
         payload = {**body, "timeStamp": int(self.now() * 1000)}
