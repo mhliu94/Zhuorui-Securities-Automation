@@ -182,7 +182,7 @@ during regular hours. In premarket and after-hours it becomes a DAY `LO` using
 Zhuorui's fresh order book: best ask +1% for buys (round up to the price tick), best bid
 -1% for sells (round down). A failed or unusable price read is retried once;
 orders are never resubmitted automatically. Closed or unknown sessions reject.
-`LIMIT_ORDER` and `LIMIT_ORDER_FOK` require `qty_shares` and `limit_price`; FOK uses
+`LIMIT_ORDER` and `LIMIT_ORDER_IOC` require `qty_shares` and `limit_price`; FOK uses
 the one-second cancellation policy. Market also accepts `notional_usd` when a
 fresh real-time quote is available; delayed quotes require explicit `qty_shares`.
 
@@ -253,3 +253,5 @@ $env:PYTHONPATH = "$PWD;$PWD\api_research"
 
 No test submits or cancels a real trade. [Protocol evidence](api_research/README.md)
 distinguishes observed formats and verified login recovery from unverified trade execution.
+
+KTrader and Nextgen use `LIMIT_ORDER_IOC` with `time_in_force: IOC` for a limit followed by cancellation of its remaining shares. Partial fills count. The listener also accepts the previous `LIMIT_ORDER_FOK` spelling for retained commands.

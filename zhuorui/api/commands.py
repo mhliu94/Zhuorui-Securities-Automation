@@ -49,6 +49,8 @@ ORDER_TYPES = {
     "limit": "limit", "limit_order": "limit",
     "fok": "fok", "fill_or_kill": "fok", "limit_order_fok": "fok",
     "timed_cancel": "fok",
+    # The internal timed-cancel tag is persisted in existing execution journals.
+    "ioc": "fok", "immediate_or_cancel": "fok", "limit_order_ioc": "fok",
 }
 CANCEL_TYPES = {
     "cancel", "cancel_all", "cancel_order", "cancel_orders",
@@ -246,18 +248,18 @@ def parse_command(payload: dict, config: dict, *, message_id=None, server_id=Non
     def order_type(value):
         normalized = ORDER_TYPES.get(_normalize(_text(value, "Order type")))
         if normalized is None:
-            raise CommandError("Supported order types are MARKET_ORDER, LIMIT_ORDER and LIMIT_ORDER_FOK.")
+            raise CommandError("Supported order types are MARKET_ORDER, LIMIT_ORDER and LIMIT_ORDER_IOC (legacy alias LIMIT_ORDER_FOK).")
         return normalized
 
     kind = _alias(payload, TYPE_KEYS, order_type, "market")
     tif = _alias(payload, ("time_in_force", "tif", "timeInForce"),
                  lambda v: _normalize(_text(v, "Time in force")), "day")
-    if tif in {"fok", "fill_or_kill"}:
+    if tif in {"ioc", "immediate_or_cancel", "fok", "fill_or_kill"}:
         if kind == "market":
             raise CommandError("Market orders cannot use the limit-order timed cancellation policy.")
         kind = "fok"
     elif tif != "day":
-        raise CommandError("Only DAY or the limit-order FOK cancellation policy is supported.")
+        raise CommandError("Only DAY or the limit-order IOC cancellation policy is supported.")
     symbol = _alias(payload, ("symbol", "ticker", "code"), lambda v: _text(v, "Symbol").upper())
     if symbol is None or not re.fullmatch(r"[A-Z0-9.=\-]{1,16}", symbol):
         raise CommandError("Symbol must contain 1-16 letters, digits, dots, dashes or equals signs.")

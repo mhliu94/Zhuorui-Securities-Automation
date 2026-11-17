@@ -26,6 +26,11 @@ class ApiCommandTests(unittest.TestCase):
         with self.assertRaises(CommandError):
             parse_command({"type": "CANCEL_ORDER", "account_id": "ACC-ZHUORUI", "command_id": "cancel-1"}, CONFIG)
 
+    def test_ioc_and_legacy_alias_have_the_same_timed_cancel_fingerprint(self):
+        def parse(tif):
+            return parse_command(order(type="LIMIT_ORDER_"+tif,time_in_force=tif,limit_price=10,cancel_unfilled=True), CONFIG)
+        self.assertEqual(command_fingerprint(parse("IOC")), command_fingerprint(parse("FOK")))
+
     def test_current_ktrader_market_contract(self):
         result = parse_command(order(), CONFIG)
         self.assertEqual(result, TradingCommand("producer-123", "BILI", "buy", 1,
