@@ -17,6 +17,7 @@ def cash_row(currency="USD", account="broker-demo", kind="M"):
         "moneyType": currency, "fundAccount": account, "accType": kind,
         "cashAmt": Decimal("9999.12"), "enableCash": Decimal("8765.43"),
         "cashBalance": 0,
+        "enableBalances": {"usEnableBalance": Decimal("500.00")},
         "cashAmts": {"usCashAmt": Decimal("123.456789123456789"), "hkCashAmt": Decimal("-4.50"), "cnCashAmt": 0},
     }
 
@@ -40,7 +41,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_exact_existing_schema_and_native_currency_cash(self):
         snapshot = self.snapshot()
-        self.assertEqual(set(snapshot), {"account_id", "account_num_id", "cash", "cash_by_currency", "positions", "ts", "trading_enabled"})
+        self.assertEqual(set(snapshot), {"account_id", "account_num_id", "cash", "cash_by_currency", "available_cash_by_currency", "cash_basis", "positions", "ts", "trading_enabled"})
         self.assertEqual(snapshot["cash"], Decimal("123.456789123456789"))
         self.assertEqual(snapshot["cash_by_currency"], {"USD": Decimal("123.456789123456789"), "HKD": Decimal("-4.50"), "CNH": Decimal(0)})
         self.assertEqual(snapshot["positions"], [{"symbol": "DEMO", "qty": Decimal(20), "avg_price": Decimal("15.2300")}])
@@ -57,8 +58,16 @@ class SnapshotTests(unittest.TestCase):
         self.cash["data"][1]["cashAmts"]["usCashAmt"] = Decimal("400.05")
         self.assertEqual(self.snapshot()["cash"], Decimal("400.05"))
 
+    def test_usd_available_excludes_holds_and_zero_is_preserved(self):
+        for amount in (Decimal("83.45"), Decimal("0")):
+            self.cash["data"][0]["enableBalances"]["usEnableBalance"] = amount
+            snapshot = self.snapshot()
+            self.assertEqual(snapshot["cash"], amount)
+            self.assertEqual(snapshot["cash_by_currency"]["USD"], amount)
+            self.assertEqual(snapshot["available_cash_by_currency"]["USD"], amount)
+
     def test_missing_cash_does_not_become_zero(self):
-        for field in ("cashAmts",):
+        for field in ("cashAmts","enableBalances"):
             with self.subTest(field=field):
                 source = deepcopy(self.cash)
                 del source["data"][0][field]

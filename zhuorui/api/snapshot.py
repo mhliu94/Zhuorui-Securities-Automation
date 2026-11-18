@@ -113,8 +113,14 @@ def cash_balances(config: dict, cash_response: dict, account_response: dict | No
         raise SnapshotError("Cash response is missing the native currency breakdown (cashAmts).")
     # CNH deliberately preserves the existing UI publisher's label, whose
     # tvCNHCash field reads the API's cnCashAmt despite moneyType being CNY.
-    return {currency: _decimal(amounts.get(field), f"cashAmts.{field}")
+    balances = {currency: _decimal(amounts.get(field), f"cashAmts.{field}")
             for currency, field in (("HKD", "hkCashAmt"), ("USD", "usCashAmt"), ("CNH", "cnCashAmt"))}
+
+    enabled = selected[0].get("enableBalances")
+    if not isinstance(enabled, dict):
+        raise SnapshotError("Cash response is missing native currency available balances.")
+    balances["USD"] = min(balances["USD"], _decimal(enabled.get("usEnableBalance"), "enableBalances.usEnableBalance"))
+    return balances
 
 
 def security_positions(holdings_response: dict) -> list[dict]:
@@ -155,6 +161,8 @@ def account_snapshot(config: dict, holdings_response: dict, cash_response: dict,
         "account_num_id": account_num_id,
         "cash": cash["USD"],
         "cash_by_currency": cash,
+        "available_cash_by_currency": {"USD": cash["USD"]},
+        "cash_basis": "Native USD cash capped by usEnableBalance",
         "positions": security_positions(holdings_response),
         "ts": stamp.astimezone(timezone.utc).isoformat(),
         "trading_enabled": trading_enabled,
