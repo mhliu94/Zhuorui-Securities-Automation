@@ -31,18 +31,24 @@ class OrderDateReadTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             client = Mock()
             client.query.return_value = {"code": "000000", "data": []}
-            client.query_orders_for_date.return_value = {"code": "000000", "data": [
-                {"ts": "US", "orderTxnReference": "old-manual", "entrustStatus": "NEW"},
-                {"ts": "US", "orderTxnReference": "other-algo", "entrustStatus": "NEW"}]}
+            stamp = utc_ms(2026, 9, 29, 2)
+            client.query_order_detail.return_value = {"code": "000000", "data":
+                {"ts": "US", "orderTxnReference": "old-manual", "entrustTime": stamp, "entrustStatus": "NEW"}}
             journal = CommandJournal(Path(folder) / "journal.sqlite3", {"account": "synthetic"})
             try:
                 journal.claim("cancel-old", {"synthetic": True})
                 executor = CommandExecutor(SimpleNamespace(live_orders_enabled=True),
                     SimpleNamespace(cancel_after_seconds=1), journal, lambda: client, Mock(), Mock())
                 executor.cancel_command(client, CancelCommand("cancel-old", "old-manual", False, "2026-09-29T02:00:00Z"))
-                client.query_orders_for_date.assert_called_once_with(date(2026, 9, 28))
+                client.query_order_detail.assert_called_once_with("old-manual", stamp)
+                client.query.assert_not_called()
+                client.query_orders_for_date.assert_not_called()
                 client.cancel_order.assert_called_once_with("old-manual")
                 self.assertEqual(journal.get("cancel-old")["state"], "cancel_requested")
+                client.query_order_detail.return_value["data"]["orderTxnReference"] = "other-order"
+                with self.assertRaises(ApiError):
+                    executor.cancel_command(client, CancelCommand("bad-match", "old-manual", False, "2026-09-29T02:00:00Z"))
+                client.cancel_order.assert_called_once_with("old-manual")
             finally:
                 journal.close()
 

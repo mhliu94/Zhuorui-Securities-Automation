@@ -156,7 +156,7 @@ def _message(row: dict) -> str | None:
                    and not 0xD800 <= ord(c) <= 0xDFFF)[:2000] or None
 
 
-def order_snapshots(config: dict, response: dict, *, now: datetime | None = None) -> list[dict]:
+def order_snapshots(config: dict, response: dict, *, now: datetime | None = None, creation_day=None) -> list[dict]:
     """Map all orders created today in US Eastern, including terminal orders.
 
     ``now`` is the aware source observation time and supplies ``updated_at``:
@@ -168,7 +168,7 @@ def order_snapshots(config: dict, response: dict, *, now: datetime | None = None
     if not isinstance(observed, datetime) or observed.utcoffset() is None:
         raise OrderSnapshotError("Order observation time must be timezone-aware.")
     observed = observed.astimezone(timezone.utc)
-    today = observed.astimezone(NEW_YORK).date()
+    today = creation_day or observed.astimezone(NEW_YORK).date()
     if not isinstance(response, dict) or response.get("code") != "000000":
         raise OrderSnapshotError("A successful orders response is required.")
     rows = response.get("data")
@@ -269,7 +269,7 @@ def order_snapshots(config: dict, response: dict, *, now: datetime | None = None
     return snapshots
 
 
-def order_detail_snapshot(config: dict, response: dict, listed: dict, *, now: datetime) -> dict:
+def order_detail_snapshot(config: dict, response: dict, listed: dict, *, now: datetime, tracked=False) -> dict:
     """Validate a fresh detail read before using its cumulative executions.
 
     List/history responses omit ``bargainList``. The app's v2 detail endpoint
@@ -280,7 +280,9 @@ def order_detail_snapshot(config: dict, response: dict, listed: dict, *, now: da
     if (not isinstance(response, dict) or response.get("code") != "000000"
             or not isinstance(response.get("data"), dict)):
         raise OrderSnapshotError("Order detail response is missing an order record.")
-    snapshots = order_snapshots(config, {"code": "000000", "data": [response["data"]]}, now=now)
+    creation_day = datetime.fromisoformat(listed["created_at"].replace("Z", "+00:00")).astimezone(NEW_YORK).date()
+    snapshots = order_snapshots(config, {"code": "000000", "data": [response["data"]]}, now=now,
+                                creation_day=creation_day if tracked else None)
     if len(snapshots) != 1:
         raise OrderSnapshotError("Order detail does not identify today's requested order.")
     detailed = snapshots[0]

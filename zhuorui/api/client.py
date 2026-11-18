@@ -3,6 +3,7 @@
 No automatic write retry or redirect is performed. Password login is a separate
 typed operation invoked only by the listener's recovery schedule.
 """
+from zhuorui.api import latency
 import base64
 import json
 import http.client
@@ -79,6 +80,11 @@ class ApiClient:
             start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
         except (OverflowError, OSError, ValueError):
             raise ApiError("Order history date cannot be represented as an Eastern day window.") from None
+        return self.query_orders_in_window(start_ms, end_ms)
+
+    def query_orders_in_window(self, start_ms, end_ms):
+        if type(start_ms) is not int or type(end_ms) is not int or not 0 < start_ms <= end_ms <= MAX_ORDER_TIMESTAMP_MS:
+            raise ApiError("Invalid order discovery window.")
         return self._request(READ_PATHS["order-history"], {"startDate": start_ms, "endDate": end_ms})
 
     def query_order_detail(self, reference, entrust_time):
@@ -210,6 +216,7 @@ class ApiClient:
             raise ApiError("Notional amount is below one share at the reference quote.")
         return quantity
 
+    @latency.timed("broker_request", "_request", arg=1)
     def _request(self, path, body, *, write=False, login=False, trade_auth=False):
         if sum((bool(write), bool(login), bool(trade_auth))) > 1:
             raise ApiError("Unsupported mixed broker operation.")

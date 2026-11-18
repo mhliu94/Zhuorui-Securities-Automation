@@ -1,4 +1,5 @@
 """Kafka command listener and recurring account publications over HTTP APIs."""
+from zhuorui.api import latency
 from .kafka_security import connection_settings
 from datetime import datetime, timezone
 import hashlib
@@ -232,6 +233,7 @@ def record_command_result(command, status, message, **extra):
 
 
 def handle_record(record, config, settings, executor, emit):
+    received_ms = latency.now_ms()
     message_id = f"kafka:{record.topic}:{record.partition}:{record.offset}"
     command = None
     try:
@@ -239,12 +241,14 @@ def handle_record(record, config, settings, executor, emit):
         command = parse_command(payload, config, message_id=message_id, server_id=settings.server_id)
         if command is None:
             return
+        latency.received(payload, record, received_ms)
         log_event("api.commands", "Matching command received.", partition=record.partition, offset=record.offset)
         stamp = getattr(record, "timestamp", None)
         if not isinstance(stamp, (int, float)) or isinstance(stamp, bool) or stamp <= 0:
             raise ApiError("Kafka command has no trustworthy timestamp; it will not be executed.")
         validate_command_age(payload, now=time.time(), max_age_seconds=settings.command_max_age_seconds, kafka_timestamp_ms=stamp)
-        executor.execute(command)
+        with latency.span("command_execution", "execute", payload):
+            executor.execute(command)
     except ApiError as exc:
         emit(command, "rejected", str(exc), command_id=command.command_id if command else message_id)
 

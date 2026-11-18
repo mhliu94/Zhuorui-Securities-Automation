@@ -78,7 +78,7 @@ class OrderPublishingTests(unittest.TestCase):
             self.publisher.publish(reason)
         self.assertEqual([call.args[0] for call in self.client.query.call_args_list],
                          ["account", "cash", "holdings", "orders"] * 4)
-        self.assertEqual(self.client.query_orders_for_date.call_count, 4)
+        self.assertEqual(self.client.query_orders_for_date.call_count, 1)
         self.client.query_orders_for_date.assert_called_with(NOW.date())
         self.assertEqual(len(self.events()), 4)
         event = self.events()[0].args[1]
@@ -91,6 +91,21 @@ class OrderPublishingTests(unittest.TestCase):
         self.assertEqual(self.publisher.published, 4)
         self.assertEqual(self.publisher.orders_published, 4)
         self.assertEqual(self.state.values["last_orders_count"], 1)
+
+    def test_follow_missing_inflight_reference_and_query_only_new_history_window(self):
+        self.publisher.publish("periodic")
+        original = self.current.pop()
+        self.history = [dict(original, entrustStatus="8", businessAmount=10)]
+        self.client.query_orders_in_window.return_value = {"code": "000000", "data": []}
+        self.publisher.wall = lambda: NOW.timestamp()+2
+        self.publisher.publish("periodic")
+        self.client.query_orders_for_date.assert_called_once()
+        self.client.query_orders_in_window.assert_called_once_with(int(NOW.timestamp()*1000), int(NOW.timestamp()*1000)+2000)
+        self.client.query_order_detail.assert_called_once_with(original["orderTxnReference"], original["entrustTime"])
+        self.assertEqual(self.events()[-1].args[1]["status"], "FILLED")
+        self.publisher.wall = lambda: NOW.timestamp()+3
+        self.publisher.publish("periodic")
+        self.assertEqual(self.client.query_order_detail.call_count, 1)
 
     def test_empty_success_has_no_order_message_or_sequence_file(self):
         self.client.query.side_effect = lambda name: {"code": "000000"}

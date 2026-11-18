@@ -1,4 +1,5 @@
 """Independent holdings and order publisher; reads never delay FOK cancel."""
+from zhuorui.api import latency
 import json
 import heapq
 from datetime import datetime, timezone
@@ -91,6 +92,7 @@ class HoldingsPublisher:
         self.orders_published = 0
         self.order_failures = 0
         self.order_journal = None
+        self.history_cursor = None
         from .account_delta import AccountDeltaPublisher, OrderChanges
         self._account_deltas = AccountDeltaPublisher()
         self._order_changes = OrderChanges()
@@ -179,9 +181,15 @@ class HoldingsPublisher:
         start, client, stage = self.now(), None, "session"
         try:
             client = self.client_provider()
-            day = datetime.fromtimestamp(self.wall(), NEW_YORK).date()
+            sweep_ms = int(self.wall() * 1000)
+            day = datetime.fromtimestamp(sweep_ms / 1000, NEW_YORK).date()
             stage = "order_history_query"
-            history = order_rows(client.query_orders_for_date(day))
+            if self.history_cursor is None or self.history_cursor[0] != day or sweep_ms < self.history_cursor[1]:
+                history = order_rows(client.query_orders_for_date(day))
+            elif sweep_ms > self.history_cursor[1]:
+                history = order_rows(client.query_orders_in_window(self.history_cursor[1], sweep_ms))
+            else:
+                history = []
             stage = "today_orders_query"
             current = order_rows(client.query("orders"))
             # Each endpoint must have unique stable references. Current order
@@ -201,8 +209,32 @@ class HoldingsPublisher:
             stage = "order_snapshot"
             snapshots = order_snapshots(self.config, {"code": "000000", "data": list(merged.values())},
                                         now=observed_at)
+            path = getattr(self.settings, "order_snapshot_journal_file", None)
+            if self.order_journal is None and path is not None and Path(path).exists():
+                self.order_journal = OrderPublicationJournal(path, binding(self.config))
+            visible = {snapshot["order_id"] for snapshot in snapshots}
+            if self.order_journal is not None:
+                for saved in self.order_journal.tracked():
+                    if saved["order_id"] in visible:
+                        continue
+                    created = datetime.fromisoformat(saved["created_at"].replace("Z", "+00:00"))
+                    stamp = round(created.timestamp() * 1000)
+                    try:
+                        detail = client.query_order_detail(saved["order_id"], stamp)
+                        snapshots.append(order_detail_snapshot(self.config, detail, saved, now=observed_at, tracked=True))
+                    except Exception as exc:
+                        from .errors import SessionExpired
+                        if isinstance(exc, SessionExpired):
+                            raise
+                        log_event("api.publisher", "Tracked ticket detail unavailable; retaining previous state.",
+                                  level="WARNING", stage="order_detail_query", error=exc)
             for index, snapshot in enumerate(snapshots):
                 if snapshot["filled_quantity"] > 0 and snapshot["average_fill_price"] is None:
+                    if self.order_journal is not None:
+                        price = self.order_journal.confirmed_terminal_price(snapshot)
+                        if price is not None:
+                            snapshot["average_fill_price"] = price
+                            continue
                     stage = "order_detail_query"
                     row = merged[snapshot["order_id"]]
                     detail = client.query_order_detail(snapshot["order_id"], int(Decimal(str(row["entrustTime"]))))
@@ -253,7 +285,8 @@ class HoldingsPublisher:
                     raise ApiError("Order snapshot exceeds the KTrader 64 KiB limit.")
                 stage = "order_kafka_send"
                 key = canonical([event["account_id"], event["order_id"]])
-                self.producer.send(self.settings.order_status_topic, event, key=key).get(timeout=10)
+                with latency.span("report_delivery", "order_status", event):
+                    self.producer.send(self.settings.order_status_topic, event, key=key).get(timeout=10)
                 self.orders_published += 1
                 stage = "order_journal_ack"
                 if not self.order_journal.ack(event):
@@ -272,6 +305,7 @@ class HoldingsPublisher:
                       retried_prior_orders=len(events) - len(snapshots),
                       recovered_after_failures=self.order_failures, total_seconds=round(self.now() - start, 3))
             self.order_failures = 0
+            self.history_cursor = (day, sweep_ms)
         except Exception as exc:
             self.order_failures += 1
             log_event("api.publisher", "Order query/publication failed.", level="ERROR", error=exc,

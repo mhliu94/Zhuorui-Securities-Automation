@@ -168,6 +168,27 @@ class OrderPublicationJournal:
         except sqlite3.Error:
             raise ApiError("Could not persist order snapshot before publication; check the order snapshot journal.") from None
 
+    def confirmed_terminal_price(self, snapshot):
+        """Reuse the confirmed price only for the same terminal execution."""
+        if snapshot["status"] not in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
+            return None
+        with self._lock:
+            row = self.db.execute("SELECT * FROM order_publications WHERE id=?", (snapshot["order_id"],)).fetchone()
+            if row is None:
+                return None
+            prior = self._restore(row, snapshot["order_id"])
+            fields = ("account_id", "created_at", "symbol", "side", "quantity", "filled_quantity", "status")
+            if all(prior.get(k) == snapshot.get(k) for k in fields):
+                return prior.get("average_fill_price")
+            return None
+
+    def tracked(self):
+        """Return the last known snapshot of each unresolved broker ticket."""
+        with self._lock:
+            rows = self.db.execute("""SELECT * FROM order_publications WHERE
+                json_extract(payload,'$.status') NOT IN ('FILLED','CANCELED','EXPIRED','REJECTED')""")
+            return [self._restore(row, row["id"]) for row in rows]
+
     def pending(self):
         """Return each latest unacknowledged payload, including earlier days."""
         try:
